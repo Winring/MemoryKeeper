@@ -2,7 +2,7 @@
 
 > Capture the moments that matter.
 
-MemoryKeeper automatically takes screenshots when something worth remembering happens in World of Warcraft. From a hard-earned achievement to a final boss blow, it quietly preserves your important milestones using the game’s built-in screenshot system.
+MemoryKeeper automatically takes screenshots when something worth remembering happens in World of Warcraft. From a hard-earned achievement to a final boss blow, it quietly preserves your important milestones.
 
 ## Features
 
