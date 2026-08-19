@@ -32,7 +32,7 @@ local rowDefs = {
     { label = "Mythic+ completions", key = "mythicPlus", silentKey = "silentMythicPlus" },
     { label = "Level ups", key = "levelUp", silentKey = "silentLevelUp" },
     { label = "PvP match completion", key = "pvp", silentKey = "silentPvP" },
-    { label = "Reputation updates", key = "reputation", silentKey = "silentReputation" },
+    { label = "Reputation milestones", key = "reputation", silentKey = "silentReputation" },
     { label = "In-game cinematic scenes", key = "cinematic", silentKey = "silentCinematic" },
 }
 

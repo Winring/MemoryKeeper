@@ -3,3 +3,6 @@ V1.0.0
 
 V1.1.0
 - New option to capture In-Game cinematics
+
+V1.1.1
+- Reputation screenshots fix

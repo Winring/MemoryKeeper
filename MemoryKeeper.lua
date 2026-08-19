@@ -1,6 +1,7 @@
 local ADDON_NAME = "MemoryKeeper"
 local addon = CreateFrame("Frame")
-local lastScreenshotTimes = {}
+local pendingTimers = {}
+local lastScreenshotTime = {}
 local recentCriteria = {}
 local recentAchievements = {}
 local cinematicActive = false
@@ -51,10 +52,8 @@ local function Debug(msg)
 end
 
 local function CanScreenshot(category)
-    local lastTime = lastScreenshotTimes[category]
-    if not lastTime then
-        return true
-    end
+    category = category or "general"
+    local lastTime = lastScreenshotTime[category] or 0
     return (GetTime() - lastTime) >= (MemoryKeeperDB.cooldown or 2.0)
 end
 
@@ -66,7 +65,7 @@ local function DoScreenshot(reason, silent, category)
         return
     end
 
-    lastScreenshotTimes[category] = GetTime()
+    lastScreenshotTime[category] = GetTime()
 
     if silent and ActionStatus and ActionStatus.UnregisterEvent then
         ActionStatus:UnregisterEvent("SCREENSHOT_SUCCEEDED")
@@ -76,19 +75,30 @@ local function DoScreenshot(reason, silent, category)
         Screenshot()
     end
 
-    Debug("Screenshot: " .. tostring(reason) .. " (silent=" .. tostring(silent) .. ")")
+    Debug("Screenshot: " .. tostring(reason) .. " (category=" .. tostring(category) .. ", silent=" .. tostring(silent) .. ")")
+end
+
+local function CancelPendingTimer(category)
+    local timer = pendingTimers[category]
+    if timer and timer.Cancel then
+        timer:Cancel()
+    end
+    pendingTimers[category] = nil
 end
 
 local function QueueScreenshot(reason, delay, silent, category)
-    delay = delay or MemoryKeeperDB.screenshotDelay or 0.8
     category = category or "general"
+    delay = delay or MemoryKeeperDB.screenshotDelay or 0.8
 
-    -- Each event gets its own timer. A boss kill must not cancel an achievement
-    -- screenshot (or vice versa). Duplicate triggers are handled separately by
-    -- the per-event de-duplication and cooldown logic.
-    C_Timer.NewTimer(delay, function()
+    -- Only replace a pending screenshot from the same category.
+    -- Different event types must never cancel each other.
+    CancelPendingTimer(category)
+
+    local timer = C_Timer.NewTimer(delay, function()
+        pendingTimers[category] = nil
         DoScreenshot(reason, silent, category)
     end)
+    pendingTimers[category] = timer
 end
 
 local function IsNewAchievement(id)
@@ -123,7 +133,9 @@ addon:SetScript("OnEvent", function(self, event, ...)
         self:RegisterEvent("CHALLENGE_MODE_COMPLETED")
         self:RegisterEvent("PLAYER_LEVEL_UP")
         self:RegisterEvent("PVP_MATCH_COMPLETE")
-        self:RegisterEvent("UPDATE_FACTION")
+        self:RegisterEvent("FACTION_STANDING_CHANGED")
+        self:RegisterEvent("MAJOR_FACTION_RENOWN_LEVEL_CHANGED")
+        self:RegisterEvent("COVENANT_SANCTUM_RENOWN_LEVEL_CHANGED")
         self:RegisterEvent("CINEMATIC_START")
         self:RegisterEvent("CINEMATIC_STOP")
 
@@ -177,11 +189,28 @@ addon:SetScript("OnEvent", function(self, event, ...)
         return
     end
 
-    if event == "UPDATE_FACTION" then
-        -- This event fires frequently, so reputation screenshots are intentionally
-        -- opt-in and debounced by the normal screenshot cooldown.
+    if event == "FACTION_STANDING_CHANGED" then
+        -- Fires when a faction's standing/reaction changes (for example Friendly -> Honored),
+        -- not for every individual reputation point gained.
         if not MemoryKeeperDB.reputation then return end
-        QueueScreenshot("Reputation update", MemoryKeeperDB.screenshotDelay, MemoryKeeperDB.silentReputation, "reputation")
+        local factionID, updatedStanding = ...
+        QueueScreenshot("Reputation standing changed", MemoryKeeperDB.screenshotDelay, MemoryKeeperDB.silentReputation, "reputation")
+        return
+    end
+
+    if event == "MAJOR_FACTION_RENOWN_LEVEL_CHANGED" then
+        -- Fires when a major faction's renown level changes.
+        if not MemoryKeeperDB.reputation then return end
+        local majorFactionID, newRenownLevel, oldRenownLevel = ...
+        QueueScreenshot("Major faction renown level changed", MemoryKeeperDB.screenshotDelay, MemoryKeeperDB.silentReputation, "reputation")
+        return
+    end
+
+    if event == "COVENANT_SANCTUM_RENOWN_LEVEL_CHANGED" then
+        -- Legacy covenant renown progression event, retained for compatibility.
+        if not MemoryKeeperDB.reputation then return end
+        local newRenownLevel, oldRenownLevel = ...
+        QueueScreenshot("Covenant renown level changed", MemoryKeeperDB.screenshotDelay, MemoryKeeperDB.silentReputation, "reputation")
         return
     end
 
@@ -202,7 +231,7 @@ addon:SetScript("OnEvent", function(self, event, ...)
         -- First screenshot after 2 seconds, then every 5 seconds while cinematicActive
         C_Timer.After(2, function()
             if not cinematicActive or token ~= cinematicToken then return end
-            DoScreenshot("In-game cinematic", true, "cinematic")
+            DoScreenshot("In-game cinematic", MemoryKeeperDB.silentCinematic, "cinematic")
 
             -- Start a repeating ticker for subsequent screenshots every 5 seconds.
             -- Use token to ensure we can cancel/ignore stale tickers.
@@ -214,7 +243,7 @@ addon:SetScript("OnEvent", function(self, event, ...)
                     end
                     return
                 end
-                DoScreenshot("In-game cinematic", true, "cinematic")
+                DoScreenshot("In-game cinematic", MemoryKeeperDB.silentCinematic, "cinematic")
             end)
         end)
         return

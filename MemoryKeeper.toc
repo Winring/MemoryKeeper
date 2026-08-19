@@ -1,7 +1,7 @@
 ## Interface: 120100
 ## Title: MemoryKeeper
 ## Notes: Automatically captures screenshots of important in-game milestones.
-## Version: 1.1.0
+## Version: 1.1.1
 ## X-Curse-Project-ID: 1656397
 ## Author: Winring
 ## IconTexture: Interface\AddOns\MemoryKeeper\MemoryKeeperIcon.png

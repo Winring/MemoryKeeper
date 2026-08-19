@@ -12,7 +12,7 @@ MemoryKeeper automatically takes screenshots when something worth remembering ha
 * Mythic+ completion screenshots
 * Level-up screenshots
 * Optional PvP match completion screenshots
-* Optional reputation-update screenshots
+* Optional reputation milestone screenshots
 * In-game cinematic screenshots
 * Lightweight in-game options window
 
