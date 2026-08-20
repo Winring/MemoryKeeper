@@ -169,38 +169,26 @@ end
 -- promotion from ordinary grinding. This table is session state, not saved data.
 local factionRanks = {}
 
-local function GetParagonLevel(factionID)
-    if not C_Reputation.IsFactionParagon(factionID) then return 0 end
-
-    local currentValue, threshold = C_Reputation.GetFactionParagonInfo(factionID)
-    if not currentValue or not threshold or threshold == 0 then return 0 end
-
-    return math.floor(currentValue / threshold)
-end
-
 -- Ranks come in two flavours the game reads differently: friendship factions
 -- (Tillers, Brann) expose a numbered rank, everything else the classic
--- Hated..Exalted reaction. Paragon levels stack on top of a maxed faction.
+-- Hated..Exalted reaction. Paragon is left out on purpose, a refilled bar past
+-- the last rank is grinding rather than a promotion.
 -- Returns a number that only moves on an actual rank change, plus its display name.
 local function GetFactionRank(factionID)
     local friendship = C_GossipInfo.GetFriendshipReputation(factionID)
     if friendship and friendship.friendshipFactionID > 0 then
         local ranks = C_GossipInfo.GetFriendshipReputationRanks(friendship.friendshipFactionID)
         if not ranks or ranks.maxLevel == 0 then return nil end
-        return ranks.currentLevel + GetParagonLevel(factionID), friendship.reaction
+        return ranks.currentLevel, friendship.reaction
     end
 
     local data = C_Reputation.GetFactionDataByID(factionID)
     if not data then return nil end
 
-    local paragonLevel = GetParagonLevel(factionID)
     local standing = GetText("FACTION_STANDING_LABEL" .. data.reaction, UnitSex("player"))
         or ("Standing " .. data.reaction)
-    if paragonLevel > 0 then
-        standing = standing .. " +" .. paragonLevel
-    end
 
-    return data.reaction + paragonLevel, standing
+    return data.reaction, standing
 end
 
 -- The game has no call that hands over every faction, and the one list it does
@@ -238,13 +226,11 @@ local function DescribeStandingChange(factionID, updatedStanding)
 
     local isMajorFaction = C_Reputation.IsMajorFaction(factionID)
 
-    -- Reported ahead of every other exit so that any reputation gain shows up.
-    -- A record still holding the pre-change total would carry the previous rank
-    -- with it, which would make remembering anything unnecessary. Whether the
-    -- client has already written the new total by now can only be seen in game.
-    Debug(string.format("%s: event %d, record %d, reaction %d, band %d-%d, major %s",
-        data.name, updatedStanding or -1, data.currentStanding, data.reaction,
-        data.currentReactionThreshold, data.nextReactionThreshold, tostring(isMajorFaction)))
+    -- Placed ahead of every exit so that a gain shows up even for the factions
+    -- dropped below. The band tells how far the total is from the next rank.
+    Debug(string.format("%s: %d in band %d-%d, reaction %d, major %s",
+        data.name, updatedStanding or -1, data.currentReactionThreshold,
+        data.nextReactionThreshold, data.reaction, tostring(isMajorFaction)))
 
     -- Major factions announce their renown on their own event, so all this one
     -- would ever tell us about them is that points moved.

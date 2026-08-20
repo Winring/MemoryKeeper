@@ -12,7 +12,7 @@ MemoryKeeper automatically takes screenshots when something worth remembering ha
 * Mythic+ completion screenshots
 * Level-up screenshots
 * Optional PvP match completion screenshots
-* Optional reputation rank screenshots, covering classic standings, friendship ranks, renown and paragon levels
+* Optional reputation rank screenshots, covering classic standings, friendship ranks and renown levels
 * In-game cinematic screenshots
 * Settings integrated into the game's own options panel
 
