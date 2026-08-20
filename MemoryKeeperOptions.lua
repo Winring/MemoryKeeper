@@ -13,6 +13,17 @@ local function BuildSettingsPanel()
             MemoryKeeperDB, Settings.VarType.Boolean, def.label, def.defaultEnabled)
         local enableInitializer = Settings.CreateCheckbox(category, enableSetting, def.tooltip)
 
+        -- A type that tracks state stops tracking while it is switched off, so it
+        -- has to start over rather than report a change that happened in the
+        -- meantime as if it were new.
+        if def.reset then
+            enableSetting:SetValueChangedCallback(function(_, value)
+                if value then
+                    def.reset()
+                end
+            end)
+        end
+
         local silentSetting = Settings.RegisterAddOnSetting(category, def.silentSettingVariable, def.silentDbKey,
             MemoryKeeperDB, Settings.VarType.Boolean, SILENT_LABEL, def.defaultSilent)
         local silentInitializer = Settings.CreateCheckbox(category, silentSetting, SILENT_TOOLTIP)

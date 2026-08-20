@@ -164,6 +164,99 @@ local function HandleCinematic(def, event)
     end)
 end
 
+-- FACTION_STANDING_CHANGED carries the new reputation total and fires on every
+-- single point gained, so the previous rank is the only way to tell a real
+-- promotion from ordinary grinding. This table is session state, not saved data.
+local factionRanks = {}
+
+local function GetParagonLevel(factionID)
+    if not C_Reputation.IsFactionParagon(factionID) then return 0 end
+
+    local currentValue, threshold = C_Reputation.GetFactionParagonInfo(factionID)
+    if not currentValue or not threshold or threshold == 0 then return 0 end
+
+    return math.floor(currentValue / threshold)
+end
+
+-- Ranks come in two flavours the game reads differently: friendship factions
+-- (Tillers, Brann) expose a numbered rank, everything else the classic
+-- Hated..Exalted reaction. Paragon levels stack on top of a maxed faction.
+-- Returns a number that only moves on an actual rank change, plus its display name.
+local function GetFactionRank(factionID)
+    local friendship = C_GossipInfo.GetFriendshipReputation(factionID)
+    if friendship and friendship.friendshipFactionID > 0 then
+        local ranks = C_GossipInfo.GetFriendshipReputationRanks(friendship.friendshipFactionID)
+        if not ranks or ranks.maxLevel == 0 then return nil end
+        return ranks.currentLevel + GetParagonLevel(factionID), friendship.reaction
+    end
+
+    local data = C_Reputation.GetFactionDataByID(factionID)
+    if not data then return nil end
+
+    local paragonLevel = GetParagonLevel(factionID)
+    local standing = GetText("FACTION_STANDING_LABEL" .. data.reaction, UnitSex("player"))
+        or ("Standing " .. data.reaction)
+    if paragonLevel > 0 then
+        standing = standing .. " +" .. paragonLevel
+    end
+
+    return data.reaction + paragonLevel, standing
+end
+
+-- The game has no call that hands over every faction, and the one list it does
+-- offer mirrors the reputation panel, where a collapsed header hides its factions.
+-- Asking about the IDs one by one reaches every faction the character has and
+-- cannot be influenced by anything the panel is doing. The bound only has to stay
+-- above the highest faction in the game; IDs that belong to none cost a lookup
+-- returning nothing.
+local MAX_FACTION_ID = 4000
+
+-- Taken at login, and again whenever the category is switched back on, because
+-- nothing is tracked while it is off and stale ranks would report a change that
+-- already happened as if it were new.
+local function SnapshotFactionRanks()
+    wipe(factionRanks)
+    debugprofilestart()
+
+    local recorded = 0
+    for factionID = 1, MAX_FACTION_ID do
+        if C_Reputation.GetFactionDataByID(factionID) then
+            local rank = GetFactionRank(factionID)
+            factionRanks[factionID] = rank
+            if rank then
+                recorded = recorded + 1
+            end
+        end
+    end
+
+    Debug(string.format("Recorded the rank of %d factions in %.1f ms", recorded, debugprofilestop()))
+end
+
+local function DescribeStandingChange(factionID, updatedStanding)
+    -- Major factions announce their renown on their own event, so all this one
+    -- would ever tell us about them is that points moved.
+    if C_Reputation.IsMajorFaction(factionID) then return nil end
+
+    local data = C_Reputation.GetFactionDataByID(factionID)
+    if not data then return nil end
+
+    -- A record still holding the pre-change total would carry the previous rank
+    -- with it, which would make remembering anything unnecessary. Whether the
+    -- client has already written the new total by now can only be seen in game.
+    Debug(string.format("%s: event %d, record %d, reaction %d, band %d-%d",
+        data.name, updatedStanding or -1, data.currentStanding, data.reaction,
+        data.currentReactionThreshold, data.nextReactionThreshold))
+
+    local rank, standing = GetFactionRank(factionID)
+    if not rank then return nil end
+
+    local previous = factionRanks[factionID]
+    factionRanks[factionID] = rank
+    if previous == nil or previous == rank then return nil end
+
+    return "Reputation: " .. tostring(standing) .. " with " .. tostring(data.name)
+end
+
 -- Every capture type is described exactly once here. Event registration, event
 -- handling, the /mk status printout and the settings panel are all derived from
 -- this list, so adding a new type means adding a single entry.
@@ -256,21 +349,25 @@ local captureTypes = {
     {
         key = "reputation",
         label = "Reputation milestones",
-        tooltip = "Capture a screenshot when a faction standing or renown level changes.",
+        tooltip = "Capture a screenshot when a faction rank or renown level changes, in either direction.",
         dbKey = "reputation",
         silentDbKey = "silentReputation",
         defaultEnabled = false,
         defaultSilent = false,
-        -- FACTION_STANDING_CHANGED fires on a standing change (Friendly -> Honored),
-        -- not for every individual reputation point gained.
         events = { "FACTION_STANDING_CHANGED", "MAJOR_FACTION_RENOWN_LEVEL_CHANGED", "COVENANT_SANCTUM_RENOWN_LEVEL_CHANGED" },
-        describe = function(event)
+        reset = SnapshotFactionRanks,
+        describe = function(event, ...)
             if event == "MAJOR_FACTION_RENOWN_LEVEL_CHANGED" then
-                return "Major faction renown level changed"
+                local majorFactionID, newRenownLevel = ...
+                local data = C_MajorFactions.GetMajorFactionData(majorFactionID)
+                return "Renown " .. tostring(newRenownLevel) .. " with " .. tostring(data and data.name or majorFactionID)
             elseif event == "COVENANT_SANCTUM_RENOWN_LEVEL_CHANGED" then
-                return "Covenant renown level changed"
+                local newRenownLevel = ...
+                return "Covenant renown " .. tostring(newRenownLevel)
             end
-            return "Reputation standing changed"
+
+            local factionID, updatedStanding = ...
+            return DescribeStandingChange(factionID, updatedStanding)
         end,
     },
     {
@@ -324,8 +421,20 @@ addon:SetScript("OnEvent", function(self, event, ...)
         for registeredEvent in pairs(captureTypeByEvent) do
             self:RegisterEvent(registeredEvent)
         end
+        self:RegisterEvent("PLAYER_LOGIN")
 
         print("|cff66ccffMemoryKeeper|r loaded. Type |cffffff00/memorykeeper|r for options.")
+        return
+    end
+
+    -- Types that recognise a change by comparing against an earlier state need
+    -- that state before anything can change, which is once the game data is up.
+    if event == "PLAYER_LOGIN" then
+        for _, def in ipairs(captureTypes) do
+            if def.reset then
+                def.reset()
+            end
+        end
         return
     end
 

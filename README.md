@@ -12,7 +12,7 @@ MemoryKeeper automatically takes screenshots when something worth remembering ha
 * Mythic+ completion screenshots
 * Level-up screenshots
 * Optional PvP match completion screenshots
-* Optional reputation milestone screenshots
+* Optional reputation rank screenshots, covering classic standings, friendship ranks, renown and paragon levels
 * In-game cinematic screenshots
 * Settings integrated into the game's own options panel
 
@@ -22,7 +22,7 @@ MemoryKeeper automatically takes screenshots when something worth remembering ha
 * Choose normal or silent screenshot notifications independently for each event type
 * A short delay gives achievement and criteria notifications time to appear on screen
 * Duplicate triggers are reduced with a configurable screenshot cooldown
-* Achievement and criterion bursts are de-duplicated automatically when possible
+* Reputation is only captured when a rank actually moves, in either direction, never on plain point gains
 * In-game cinematics take a screenshot 2 seconds after starting, then every 5 seconds until the cinematic ends
 * Works quietly in the background while you play
 

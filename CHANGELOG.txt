@@ -9,3 +9,5 @@ V1.1.1
 
 V1.1.2
 - Options now live in the game's own settings panel under Options > AddOns
+- Silent notification now really hides the "Screenshot taken" message
+- Reputation screenshots only on an actual rank change instead of every point
