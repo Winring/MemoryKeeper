@@ -233,19 +233,22 @@ local function SnapshotFactionRanks()
 end
 
 local function DescribeStandingChange(factionID, updatedStanding)
-    -- Major factions announce their renown on their own event, so all this one
-    -- would ever tell us about them is that points moved.
-    if C_Reputation.IsMajorFaction(factionID) then return nil end
-
     local data = C_Reputation.GetFactionDataByID(factionID)
     if not data then return nil end
 
+    local isMajorFaction = C_Reputation.IsMajorFaction(factionID)
+
+    -- Reported ahead of every other exit so that any reputation gain shows up.
     -- A record still holding the pre-change total would carry the previous rank
     -- with it, which would make remembering anything unnecessary. Whether the
     -- client has already written the new total by now can only be seen in game.
-    Debug(string.format("%s: event %d, record %d, reaction %d, band %d-%d",
+    Debug(string.format("%s: event %d, record %d, reaction %d, band %d-%d, major %s",
         data.name, updatedStanding or -1, data.currentStanding, data.reaction,
-        data.currentReactionThreshold, data.nextReactionThreshold))
+        data.currentReactionThreshold, data.nextReactionThreshold, tostring(isMajorFaction)))
+
+    -- Major factions announce their renown on their own event, so all this one
+    -- would ever tell us about them is that points moved.
+    if isMajorFaction then return nil end
 
     local rank, standing = GetFactionRank(factionID)
     if not rank then return nil end
