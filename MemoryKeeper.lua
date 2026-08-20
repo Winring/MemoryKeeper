@@ -221,20 +221,17 @@ local function SnapshotFactionRanks()
 end
 
 local function DescribeStandingChange(factionID, updatedStanding)
+    -- Major factions announce their renown on their own event, so all this one
+    -- would ever tell us about them is that points moved.
+    if C_Reputation.IsMajorFaction(factionID) then return nil end
+
     local data = C_Reputation.GetFactionDataByID(factionID)
     if not data then return nil end
 
-    local isMajorFaction = C_Reputation.IsMajorFaction(factionID)
-
-    -- Placed ahead of every exit so that a gain shows up even for the factions
-    -- dropped below. The band tells how far the total is from the next rank.
-    Debug(string.format("%s: %d in band %d-%d, reaction %d, major %s",
+    -- The band the new total lands in shows how far the next rank still is.
+    Debug(string.format("%s: %d in band %d-%d, reaction %d",
         data.name, updatedStanding or -1, data.currentReactionThreshold,
-        data.nextReactionThreshold, data.reaction, tostring(isMajorFaction)))
-
-    -- Major factions announce their renown on their own event, so all this one
-    -- would ever tell us about them is that points moved.
-    if isMajorFaction then return nil end
+        data.nextReactionThreshold, data.reaction))
 
     local rank, standing = GetFactionRank(factionID)
     if not rank then return nil end
