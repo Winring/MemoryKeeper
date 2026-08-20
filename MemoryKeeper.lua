@@ -1,49 +1,19 @@
-local ADDON_NAME = "MemoryKeeper"
+local ADDON_NAME, MK = ...
+
 local addon = CreateFrame("Frame")
 local pendingTimers = {}
 local lastScreenshotTime = {}
-local recentCriteria = {}
-local recentAchievements = {}
 local cinematicActive = false
 local cinematicToken = 0
 local cinematicTicker = nil
 
 MemoryKeeperDB = MemoryKeeperDB or {}
 
-local defaults = {
-    achievement = true,
-    criteria = true,
-    boss = true,
-    mythicPlus = true,
-    levelUp = true,
-    pvp = false,
-    reputation = false,
-    cinematic = true,
+local globalDefaults = {
     screenshotDelay = 0.8,
     cooldown = 2.0,
     debug = false,
-
-    -- Per-category screenshot notification behavior.
-    -- false = normal "Screenshot taken" notification, true = silent.
-    silentAchievement = false,
-    silentCriteria = false,
-    silentBoss = false,
-    silentMythicPlus = false,
-    silentLevelUp = false,
-    silentPvP = false,
-    silentReputation = false,
-    silentCinematic = true,
 }
-
-local function CopyDefaults(target, source)
-    for k, v in pairs(source) do
-        if target[k] == nil then
-            target[k] = v
-        end
-    end
-end
-
-CopyDefaults(MemoryKeeperDB, defaults)
 
 local function Debug(msg)
     if MemoryKeeperDB.debug then
@@ -52,14 +22,65 @@ local function Debug(msg)
 end
 
 local function CanScreenshot(category)
-    category = category or "general"
     local lastTime = lastScreenshotTime[category] or 0
-    return (GetTime() - lastTime) >= (MemoryKeeperDB.cooldown or 2.0)
+    return (GetTime() - lastTime) >= (MemoryKeeperDB.cooldown or globalDefaults.cooldown)
+end
+
+-- Blizzard's ActionStatus frame prints "Screenshot taken" when the client reports
+-- SCREENSHOT_SUCCEEDED. The client only reports that once the image has actually
+-- been written, which is several frames after Screenshot() returns, so the frame
+-- has to stay unsubscribed until the result arrives rather than just across the
+-- call. While it is unsubscribed we listen for the result ourselves.
+local SILENT_RELEASE_TIMEOUT = 10
+
+local screenshotWatcher = CreateFrame("Frame")
+local outstandingSilentShots = 0
+local silentReleaseTimer = nil
+
+local function RestoreScreenshotNotification()
+    if outstandingSilentShots == 0 then return end
+
+    outstandingSilentShots = 0
+    if silentReleaseTimer then
+        silentReleaseTimer:Cancel()
+        silentReleaseTimer = nil
+    end
+
+    screenshotWatcher:UnregisterEvent("SCREENSHOT_SUCCEEDED")
+    screenshotWatcher:UnregisterEvent("SCREENSHOT_FAILED")
+
+    if ActionStatus and ActionStatus.RegisterEvent then
+        ActionStatus:RegisterEvent("SCREENSHOT_SUCCEEDED")
+    end
+end
+
+screenshotWatcher:SetScript("OnEvent", function()
+    outstandingSilentShots = outstandingSilentShots - 1
+    if outstandingSilentShots <= 0 then
+        RestoreScreenshotNotification()
+    end
+end)
+
+local function SuppressScreenshotNotification()
+    if not (ActionStatus and ActionStatus.UnregisterEvent) then return false end
+
+    if outstandingSilentShots == 0 then
+        ActionStatus:UnregisterEvent("SCREENSHOT_SUCCEEDED")
+        screenshotWatcher:RegisterEvent("SCREENSHOT_SUCCEEDED")
+        screenshotWatcher:RegisterEvent("SCREENSHOT_FAILED")
+    end
+    outstandingSilentShots = outstandingSilentShots + 1
+
+    -- Safety net in case the client never reports a result for this screenshot.
+    if silentReleaseTimer then
+        silentReleaseTimer:Cancel()
+    end
+    silentReleaseTimer = C_Timer.NewTimer(SILENT_RELEASE_TIMEOUT, RestoreScreenshotNotification)
+
+    return true
 end
 
 local function DoScreenshot(reason, silent, category)
-    category = category or "general"
-
     if not CanScreenshot(category) then
         Debug("Screenshot skipped due to cooldown: " .. tostring(reason))
         return
@@ -67,13 +88,10 @@ local function DoScreenshot(reason, silent, category)
 
     lastScreenshotTime[category] = GetTime()
 
-    if silent and ActionStatus and ActionStatus.UnregisterEvent then
-        ActionStatus:UnregisterEvent("SCREENSHOT_SUCCEEDED")
-        Screenshot()
-        ActionStatus:RegisterEvent("SCREENSHOT_SUCCEEDED")
-    else
-        Screenshot()
+    if silent then
+        SuppressScreenshotNotification()
     end
+    Screenshot()
 
     Debug("Screenshot: " .. tostring(reason) .. " (category=" .. tostring(category) .. ", silent=" .. tostring(silent) .. ")")
 end
@@ -87,9 +105,6 @@ local function CancelPendingTimer(category)
 end
 
 local function QueueScreenshot(reason, delay, silent, category)
-    category = category or "general"
-    delay = delay or MemoryKeeperDB.screenshotDelay or 0.8
-
     -- Only replace a pending screenshot from the same category.
     -- Different event types must never cancel each other.
     CancelPendingTimer(category)
@@ -101,155 +116,10 @@ local function QueueScreenshot(reason, delay, silent, category)
     pendingTimers[category] = timer
 end
 
-local function IsNewAchievement(id)
-    if not id then return true end
-    if recentAchievements[id] and (GetTime() - recentAchievements[id]) < 3 then
-        return false
-    end
-    recentAchievements[id] = GetTime()
-    return true
-end
-
-local function IsNewCriteria(id)
-    if not id then return true end
-    if recentCriteria[id] and (GetTime() - recentCriteria[id]) < 3 then
-        return false
-    end
-    recentCriteria[id] = GetTime()
-    return true
-end
-
-addon:RegisterEvent("ADDON_LOADED")
-addon:SetScript("OnEvent", function(self, event, ...)
-    if event == "ADDON_LOADED" then
-        local name = ...
-        if name ~= ADDON_NAME then return end
-
-        CopyDefaults(MemoryKeeperDB, defaults)
-
-        self:RegisterEvent("ACHIEVEMENT_EARNED")
-        self:RegisterEvent("CRITERIA_EARNED")
-        self:RegisterEvent("ENCOUNTER_END")
-        self:RegisterEvent("CHALLENGE_MODE_COMPLETED")
-        self:RegisterEvent("PLAYER_LEVEL_UP")
-        self:RegisterEvent("PVP_MATCH_COMPLETE")
-        self:RegisterEvent("FACTION_STANDING_CHANGED")
-        self:RegisterEvent("MAJOR_FACTION_RENOWN_LEVEL_CHANGED")
-        self:RegisterEvent("COVENANT_SANCTUM_RENOWN_LEVEL_CHANGED")
-        self:RegisterEvent("CINEMATIC_START")
-        self:RegisterEvent("CINEMATIC_STOP")
-
-        print("|cff66ccffMemoryKeeper|r loaded. Type |cffffff00/memorykeeper|r for options.")
-        return
-    end
-
-    if event == "ACHIEVEMENT_EARNED" then
-        if not MemoryKeeperDB.achievement then return end
-        local achievementID = ...
-        if not IsNewAchievement(achievementID) then return end
-
-        QueueScreenshot("Achievement " .. tostring(achievementID), MemoryKeeperDB.screenshotDelay, MemoryKeeperDB.silentAchievement, "achievement")
-        return
-    end
-
-    if event == "CRITERIA_EARNED" then
-        if not MemoryKeeperDB.criteria then return end
-        local criteriaID = ...
-        if not IsNewCriteria(criteriaID) then return end
-
-        QueueScreenshot("Achievement criterion " .. tostring(criteriaID), math.min(MemoryKeeperDB.screenshotDelay, 0.6), MemoryKeeperDB.silentCriteria, "criteria")
-        return
-    end
-
-    if event == "ENCOUNTER_END" then
-        if not MemoryKeeperDB.boss then return end
-        local encounterID, encounterName, difficultyID, groupSize, success = ...
-        if success == 1 then
-            QueueScreenshot("Boss kill: " .. tostring(encounterName), MemoryKeeperDB.screenshotDelay, MemoryKeeperDB.silentBoss, "boss")
-        end
-        return
-    end
-
-    if event == "CHALLENGE_MODE_COMPLETED" then
-        if not MemoryKeeperDB.mythicPlus then return end
-        QueueScreenshot("Mythic+ completed", MemoryKeeperDB.screenshotDelay, MemoryKeeperDB.silentMythicPlus, "mythicPlus")
-        return
-    end
-
-    if event == "PLAYER_LEVEL_UP" then
-        if not MemoryKeeperDB.levelUp then return end
-        local level = ...
-        QueueScreenshot("Level " .. tostring(level), MemoryKeeperDB.screenshotDelay, MemoryKeeperDB.silentLevelUp, "levelUp")
-        return
-    end
-
-    if event == "PVP_MATCH_COMPLETE" then
-        if not MemoryKeeperDB.pvp then return end
-        QueueScreenshot("PvP match complete", MemoryKeeperDB.screenshotDelay, MemoryKeeperDB.silentPvP, "pvp")
-        return
-    end
-
-    if event == "FACTION_STANDING_CHANGED" then
-        -- Fires when a faction's standing/reaction changes (for example Friendly -> Honored),
-        -- not for every individual reputation point gained.
-        if not MemoryKeeperDB.reputation then return end
-        local factionID, updatedStanding = ...
-        QueueScreenshot("Reputation standing changed", MemoryKeeperDB.screenshotDelay, MemoryKeeperDB.silentReputation, "reputation")
-        return
-    end
-
-    if event == "MAJOR_FACTION_RENOWN_LEVEL_CHANGED" then
-        -- Fires when a major faction's renown level changes.
-        if not MemoryKeeperDB.reputation then return end
-        local majorFactionID, newRenownLevel, oldRenownLevel = ...
-        QueueScreenshot("Major faction renown level changed", MemoryKeeperDB.screenshotDelay, MemoryKeeperDB.silentReputation, "reputation")
-        return
-    end
-
-    if event == "COVENANT_SANCTUM_RENOWN_LEVEL_CHANGED" then
-        -- Legacy covenant renown progression event, retained for compatibility.
-        if not MemoryKeeperDB.reputation then return end
-        local newRenownLevel, oldRenownLevel = ...
-        QueueScreenshot("Covenant renown level changed", MemoryKeeperDB.screenshotDelay, MemoryKeeperDB.silentReputation, "reputation")
-        return
-    end
-
-    if event == "CINEMATIC_START" then
-        -- Only capture Blizzard's in-engine cinematic scenes/cutscenes.
-        if not MemoryKeeperDB.cinematic or not IsInCinematicScene() then return end
-
-        cinematicActive = true
-        cinematicToken = cinematicToken + 1
-        local token = cinematicToken
-
-        -- Cancel any existing cinematic ticker to avoid duplicates
-        if cinematicTicker then
-            cinematicTicker:Cancel()
-            cinematicTicker = nil
-        end
-
-        -- First screenshot after 2 seconds, then every 5 seconds while cinematicActive
-        C_Timer.After(2, function()
-            if not cinematicActive or token ~= cinematicToken then return end
-            DoScreenshot("In-game cinematic", MemoryKeeperDB.silentCinematic, "cinematic")
-
-            -- Start a repeating ticker for subsequent screenshots every 5 seconds.
-            -- Use token to ensure we can cancel/ignore stale tickers.
-            cinematicTicker = C_Timer.NewTicker(5, function()
-                if not cinematicActive or token ~= cinematicToken then
-                    if cinematicTicker then
-                        cinematicTicker:Cancel()
-                        cinematicTicker = nil
-                    end
-                    return
-                end
-                DoScreenshot("In-game cinematic", MemoryKeeperDB.silentCinematic, "cinematic")
-            end)
-        end)
-        return
-    end
-
+local function HandleCinematic(def, event)
     if event == "CINEMATIC_STOP" then
+        -- Handled even when capturing is switched off, because a cinematic that
+        -- started while it was on must still be able to stop its ticker.
         if not cinematicActive then return end
         cinematicActive = false
         cinematicToken = cinematicToken + 1
@@ -259,21 +129,251 @@ addon:SetScript("OnEvent", function(self, event, ...)
         end
         return
     end
+
+    if not MemoryKeeperDB[def.dbKey] then return end
+
+    -- Only capture Blizzard's in-engine cinematic scenes/cutscenes.
+    if not IsInCinematicScene() then return end
+
+    cinematicActive = true
+    cinematicToken = cinematicToken + 1
+    local token = cinematicToken
+    local silent = MemoryKeeperDB[def.silentDbKey]
+
+    if cinematicTicker then
+        cinematicTicker:Cancel()
+        cinematicTicker = nil
+    end
+
+    -- First screenshot after 2 seconds, then every 5 seconds until the cinematic ends.
+    -- The token lets a newly started cinematic invalidate tickers from a previous one.
+    C_Timer.After(2, function()
+        if not cinematicActive or token ~= cinematicToken then return end
+        DoScreenshot("In-game cinematic", silent, def.key)
+
+        cinematicTicker = C_Timer.NewTicker(5, function()
+            if not cinematicActive or token ~= cinematicToken then
+                if cinematicTicker then
+                    cinematicTicker:Cancel()
+                    cinematicTicker = nil
+                end
+                return
+            end
+            DoScreenshot("In-game cinematic", silent, def.key)
+        end)
+    end)
+end
+
+-- Every capture type is described exactly once here. Event registration, event
+-- handling, the /mk status printout and the settings panel are all derived from
+-- this list, so adding a new type means adding a single entry.
+--
+-- describe() receives the event name followed by the event's own payload and
+-- returns the debug text for the screenshot, or nil to skip capturing entirely.
+local captureTypes = {
+    {
+        key = "achievement",
+        label = "Achievements",
+        tooltip = "Capture a screenshot whenever this character earns an achievement.",
+        dbKey = "achievement",
+        silentDbKey = "silentAchievement",
+        defaultEnabled = true,
+        defaultSilent = false,
+        events = { "ACHIEVEMENT_EARNED" },
+        describe = function(event, achievementID)
+            return "Achievement " .. tostring(achievementID)
+        end,
+    },
+    {
+        key = "criteria",
+        label = "Achievement criteria / steps",
+        tooltip = "Capture a screenshot whenever a single step of an achievement is completed.",
+        dbKey = "criteria",
+        silentDbKey = "silentCriteria",
+        defaultEnabled = true,
+        defaultSilent = false,
+        maxDelay = 0.6,
+        events = { "CRITERIA_EARNED" },
+        describe = function(event, achievementID, description)
+            -- Payload is (achievementID, description, achievementAlreadyEarnedOnAccount).
+            -- There is no criterion ID, only the achievement the step belongs to.
+            return "Criterion of achievement " .. tostring(achievementID) .. ": " .. tostring(description)
+        end,
+    },
+    {
+        key = "boss",
+        label = "Boss kills",
+        tooltip = "Capture a screenshot after a boss encounter ends in a kill.",
+        dbKey = "boss",
+        silentDbKey = "silentBoss",
+        defaultEnabled = true,
+        defaultSilent = false,
+        events = { "ENCOUNTER_END" },
+        describe = function(event, encounterID, encounterName, difficultyID, groupSize, success)
+            if success ~= 1 then return nil end
+            return "Boss kill: " .. tostring(encounterName)
+        end,
+    },
+    {
+        key = "mythicPlus",
+        label = "Mythic+ completions",
+        tooltip = "Capture a screenshot when a Mythic+ dungeon is completed.",
+        dbKey = "mythicPlus",
+        silentDbKey = "silentMythicPlus",
+        defaultEnabled = true,
+        defaultSilent = false,
+        events = { "CHALLENGE_MODE_COMPLETED" },
+        describe = function()
+            return "Mythic+ completed"
+        end,
+    },
+    {
+        key = "levelUp",
+        label = "Level ups",
+        tooltip = "Capture a screenshot when this character gains a level.",
+        dbKey = "levelUp",
+        silentDbKey = "silentLevelUp",
+        defaultEnabled = true,
+        defaultSilent = false,
+        events = { "PLAYER_LEVEL_UP" },
+        describe = function(event, level)
+            return "Level " .. tostring(level)
+        end,
+    },
+    {
+        key = "pvp",
+        label = "PvP match completion",
+        tooltip = "Capture a screenshot when a battleground or arena match ends.",
+        dbKey = "pvp",
+        silentDbKey = "silentPvP",
+        defaultEnabled = false,
+        defaultSilent = false,
+        events = { "PVP_MATCH_COMPLETE" },
+        describe = function()
+            return "PvP match complete"
+        end,
+    },
+    {
+        key = "reputation",
+        label = "Reputation milestones",
+        tooltip = "Capture a screenshot when a faction standing or renown level changes.",
+        dbKey = "reputation",
+        silentDbKey = "silentReputation",
+        defaultEnabled = false,
+        defaultSilent = false,
+        -- FACTION_STANDING_CHANGED fires on a standing change (Friendly -> Honored),
+        -- not for every individual reputation point gained.
+        events = { "FACTION_STANDING_CHANGED", "MAJOR_FACTION_RENOWN_LEVEL_CHANGED", "COVENANT_SANCTUM_RENOWN_LEVEL_CHANGED" },
+        describe = function(event)
+            if event == "MAJOR_FACTION_RENOWN_LEVEL_CHANGED" then
+                return "Major faction renown level changed"
+            elseif event == "COVENANT_SANCTUM_RENOWN_LEVEL_CHANGED" then
+                return "Covenant renown level changed"
+            end
+            return "Reputation standing changed"
+        end,
+    },
+    {
+        key = "cinematic",
+        label = "In-game cinematic scenes",
+        tooltip = "Capture a series of screenshots while an in-engine cinematic is playing.",
+        dbKey = "cinematic",
+        silentDbKey = "silentCinematic",
+        defaultEnabled = true,
+        defaultSilent = true,
+        events = { "CINEMATIC_START", "CINEMATIC_STOP" },
+        handler = HandleCinematic,
+    },
+}
+
+local captureTypeByEvent = {}
+for _, def in ipairs(captureTypes) do
+    def.settingVariable = "MEMORYKEEPER_" .. def.dbKey
+    def.silentSettingVariable = "MEMORYKEEPER_" .. def.silentDbKey
+    for _, event in ipairs(def.events) do
+        captureTypeByEvent[event] = def
+    end
+end
+
+MK.captureTypes = captureTypes
+
+local function ApplyDefaults()
+    for key, value in pairs(globalDefaults) do
+        if MemoryKeeperDB[key] == nil then
+            MemoryKeeperDB[key] = value
+        end
+    end
+    for _, def in ipairs(captureTypes) do
+        if MemoryKeeperDB[def.dbKey] == nil then
+            MemoryKeeperDB[def.dbKey] = def.defaultEnabled
+        end
+        if MemoryKeeperDB[def.silentDbKey] == nil then
+            MemoryKeeperDB[def.silentDbKey] = def.defaultSilent
+        end
+    end
+end
+
+addon:RegisterEvent("ADDON_LOADED")
+addon:SetScript("OnEvent", function(self, event, ...)
+    if event == "ADDON_LOADED" then
+        local name = ...
+        if name ~= ADDON_NAME then return end
+
+        ApplyDefaults()
+
+        for registeredEvent in pairs(captureTypeByEvent) do
+            self:RegisterEvent(registeredEvent)
+        end
+
+        print("|cff66ccffMemoryKeeper|r loaded. Type |cffffff00/memorykeeper|r for options.")
+        return
+    end
+
+    local def = captureTypeByEvent[event]
+    if not def then return end
+
+    -- Types with a custom handler check the enabled flag themselves, because some
+    -- of their events must run regardless of it.
+    if def.handler then
+        def.handler(def, event, ...)
+        return
+    end
+
+    if not MemoryKeeperDB[def.dbKey] then return end
+
+    local reason = def.describe(event, ...)
+    if not reason then return end
+
+    local delay = MemoryKeeperDB.screenshotDelay or globalDefaults.screenshotDelay
+    if def.maxDelay then
+        delay = math.min(delay, def.maxDelay)
+    end
+
+    QueueScreenshot(reason, delay, MemoryKeeperDB[def.silentDbKey], def.key)
 end)
+
+-- Route writes through the settings object when it exists so an open settings
+-- panel updates immediately instead of showing a stale checkbox.
+local function SetCaptureEnabled(def, enabled)
+    local setting = Settings and Settings.GetSetting and Settings.GetSetting(def.settingVariable)
+    if setting then
+        setting:SetValue(enabled)
+    else
+        MemoryKeeperDB[def.dbKey] = enabled
+    end
+end
 
 SLASH_MEMORYKEEPER1 = "/memorykeeper"
 SLASH_MEMORYKEEPER2 = "/mk"
 
 local function PrintStatus()
     print("|cff66ccffMemoryKeeper|r status:")
-    print("  Achievements:", MemoryKeeperDB.achievement and "ON" or "OFF", "silent:", MemoryKeeperDB.silentAchievement and "YES" or "NO")
-    print("  Criteria:", MemoryKeeperDB.criteria and "ON" or "OFF", "silent:", MemoryKeeperDB.silentCriteria and "YES" or "NO")
-    print("  Bosses:", MemoryKeeperDB.boss and "ON" or "OFF", "silent:", MemoryKeeperDB.silentBoss and "YES" or "NO")
-    print("  Mythic+:", MemoryKeeperDB.mythicPlus and "ON" or "OFF", "silent:", MemoryKeeperDB.silentMythicPlus and "YES" or "NO")
-    print("  Level up:", MemoryKeeperDB.levelUp and "ON" or "OFF", "silent:", MemoryKeeperDB.silentLevelUp and "YES" or "NO")
-    print("  PvP:", MemoryKeeperDB.pvp and "ON" or "OFF", "silent:", MemoryKeeperDB.silentPvP and "YES" or "NO")
-    print("  Reputation:", MemoryKeeperDB.reputation and "ON" or "OFF", "silent:", MemoryKeeperDB.silentReputation and "YES" or "NO")
-    print("  Cinematic:", MemoryKeeperDB.cinematic and "ON" or "OFF", "silent:", MemoryKeeperDB.silentCinematic and "YES" or "NO")
+    for _, def in ipairs(captureTypes) do
+        print(string.format("  %s: %s, silent: %s",
+            def.label,
+            MemoryKeeperDB[def.dbKey] and "ON" or "OFF",
+            MemoryKeeperDB[def.silentDbKey] and "YES" or "NO"))
+    end
     print("  Cooldown:", MemoryKeeperDB.cooldown)
     print("  Screenshot delay:", MemoryKeeperDB.screenshotDelay)
     print("  Debug:", MemoryKeeperDB.debug and "ON" or "OFF")
@@ -282,22 +382,17 @@ end
 SlashCmdList.MEMORYKEEPER = function(msg)
     msg = (msg or ""):lower():match("^%s*(.-)%s*$")
 
-    if msg == "on" then
-        MemoryKeeperDB.achievement = true
-        MemoryKeeperDB.criteria = true
-        print("|cff66ccffMemoryKeeper|r: achievement and criterion screenshots enabled.")
-    elseif msg == "off" then
-        MemoryKeeperDB.achievement = false
-        MemoryKeeperDB.criteria = false
-        print("|cff66ccffMemoryKeeper|r: achievement and criterion screenshots disabled.")
+    if msg == "on" or msg == "off" then
+        local enabled = msg == "on"
+        SetCaptureEnabled(captureTypeByEvent["ACHIEVEMENT_EARNED"], enabled)
+        SetCaptureEnabled(captureTypeByEvent["CRITERIA_EARNED"], enabled)
+        print("|cff66ccffMemoryKeeper|r: achievement and criterion screenshots " .. (enabled and "enabled." or "disabled."))
     elseif msg == "status" then
         PrintStatus()
     elseif msg == "debug" then
         MemoryKeeperDB.debug = not MemoryKeeperDB.debug
         print("|cff66ccffMemoryKeeper|r debug:", MemoryKeeperDB.debug and "ON" or "OFF")
-    else
-        if MemoryKeeper_OpenOptions then
-            MemoryKeeper_OpenOptions()
-        end
+    elseif MemoryKeeper_OpenOptions then
+        MemoryKeeper_OpenOptions()
     end
 end

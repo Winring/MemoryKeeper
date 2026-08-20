@@ -6,3 +6,6 @@ V1.1.0
 
 V1.1.1
 - Reputation screenshots fix
+
+V1.1.2
+- Options now live in the game's own settings panel under Options > AddOns

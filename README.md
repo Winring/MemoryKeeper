@@ -14,7 +14,7 @@ MemoryKeeper automatically takes screenshots when something worth remembering ha
 * Optional PvP match completion screenshots
 * Optional reputation milestone screenshots
 * In-game cinematic screenshots
-* Lightweight in-game options window
+* Settings integrated into the game's own options panel
 
 ## Built for memorable moments
 
@@ -28,7 +28,7 @@ MemoryKeeper automatically takes screenshots when something worth remembering ha
 
 ## Commands
 
-* `/memorykeeper` or `/mk` — open the options window
+* `/memorykeeper` or `/mk` — open the settings panel
 * `/memorykeeper status` — display current settings
 * `/memorykeeper on` — enable achievement and criterion screenshots
 * `/memorykeeper off` — disable achievement and criterion screenshots
