@@ -8,7 +8,7 @@ MemoryKeeper automatically takes screenshots when something worth remembering ha
 
 * Achievement earned screenshots
 * Achievement criterion and step screenshots
-* Boss-kill screenshots
+* Boss-kill screenshots, by default the first kill of each boss on each difficulty
 * Mythic+ completion screenshots
 * Level-up screenshots
 * Optional PvP match completion screenshots
@@ -22,6 +22,7 @@ MemoryKeeper automatically takes screenshots when something worth remembering ha
 * Choose normal or silent screenshot notifications independently for each event type
 * A short delay gives achievement and criteria notifications time to appear on screen
 * Duplicate triggers are reduced with a configurable screenshot cooldown
+* Boss kills can optionally photograph every kill instead of only the first on each difficulty
 * Reputation is only captured when a rank actually moves, in either direction, never on plain point gains
 * In-game cinematics take a screenshot 2 seconds after starting, then every 5 seconds until the cinematic ends
 * Works quietly in the background while you play

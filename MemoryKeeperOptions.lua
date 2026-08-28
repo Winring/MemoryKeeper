@@ -24,6 +24,18 @@ local function BuildSettingsPanel()
             end)
         end
 
+        if def.extraCheckboxes then
+            for _, extra in ipairs(def.extraCheckboxes) do
+                local extraSetting = Settings.RegisterAddOnSetting(category, extra.settingVariable, extra.dbKey,
+                    MemoryKeeperDB, Settings.VarType.Boolean, extra.label, extra.defaultEnabled)
+                local extraInitializer = Settings.CreateCheckbox(category, extraSetting, extra.tooltip)
+                extraInitializer:Indent()
+                extraInitializer:SetParentInitializer(enableInitializer, function()
+                    return enableSetting:GetValue()
+                end)
+            end
+        end
+
         local silentSetting = Settings.RegisterAddOnSetting(category, def.silentSettingVariable, def.silentDbKey,
             MemoryKeeperDB, Settings.VarType.Boolean, SILENT_LABEL, def.defaultSilent)
         local silentInitializer = Settings.CreateCheckbox(category, silentSetting, SILENT_TOOLTIP)

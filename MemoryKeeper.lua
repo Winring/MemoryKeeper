@@ -243,12 +243,53 @@ local function DescribeStandingChange(factionID, updatedStanding)
     return "Reputation: " .. tostring(standing) .. " with " .. tostring(data.name)
 end
 
+-- The game only knows whether a boss is dead in the current weekly lockout, not
+-- whether this character has ever killed it on a given difficulty. Kills are
+-- stored per character in SavedVariables and last until that data is wiped.
+local function GetBossKillRecord()
+    local guid = UnitGUID("player")
+    if not guid then return nil end
+
+    local byAddon = MemoryKeeperDB.killedBosses
+    if not byAddon then
+        byAddon = {}
+        MemoryKeeperDB.killedBosses = byAddon
+    end
+
+    local byCharacter = byAddon[guid]
+    if not byCharacter then
+        byCharacter = {}
+        byAddon[guid] = byCharacter
+    end
+    return byCharacter
+end
+
+local function HasRecordedBossKill(encounterID, difficultyID)
+    local record = GetBossKillRecord()
+    if not record then return false end
+    local difficulties = record[encounterID]
+    return difficulties and difficulties[difficultyID] and true or false
+end
+
+local function RecordBossKill(encounterID, difficultyID)
+    local record = GetBossKillRecord()
+    if not record then return end
+    local difficulties = record[encounterID]
+    if not difficulties then
+        difficulties = {}
+        record[encounterID] = difficulties
+    end
+    difficulties[difficultyID] = true
+end
+
 -- Every capture type is described exactly once here. Event registration, event
 -- handling, the /mk status printout and the settings panel are all derived from
 -- this list, so adding a new type means adding a single entry.
 --
 -- describe() receives the event name followed by the event's own payload and
 -- returns the debug text for the screenshot, or nil to skip capturing entirely.
+-- extraCheckboxes are shown indented under the type. remember() records state
+-- even while the type is switched off.
 local captureTypes = {
     {
         key = "achievement",
@@ -282,15 +323,34 @@ local captureTypes = {
     {
         key = "boss",
         label = "Boss kills",
-        tooltip = "Capture a screenshot after a boss encounter ends in a kill.",
+        tooltip = "Capture a screenshot after a boss kill.",
         dbKey = "boss",
         silentDbKey = "silentBoss",
         defaultEnabled = true,
         defaultSilent = false,
+        extraCheckboxes = {
+            {
+                dbKey = "bossEveryKill",
+                label = "Every kill",
+                tooltip = "Photograph every kill instead of only the first on each difficulty.",
+                defaultEnabled = false,
+            },
+        },
         events = { "ENCOUNTER_END" },
         describe = function(event, encounterID, encounterName, difficultyID, groupSize, success)
             if success ~= 1 then return nil end
+            if not MemoryKeeperDB.bossEveryKill and HasRecordedBossKill(encounterID, difficultyID) then
+                return nil
+            end
             return "Boss kill: " .. tostring(encounterName)
+        end,
+        -- Written after describe() so the first kill is still judged unseen.
+        -- Runs while the category is off so a later enable does not treat that
+        -- kill as new.
+        remember = function(event, encounterID, encounterName, difficultyID, groupSize, success)
+            if success == 1 then
+                RecordBossKill(encounterID, difficultyID)
+            end
         end,
     },
     {
@@ -373,6 +433,11 @@ local captureTypeByEvent = {}
 for _, def in ipairs(captureTypes) do
     def.settingVariable = "MEMORYKEEPER_" .. def.dbKey
     def.silentSettingVariable = "MEMORYKEEPER_" .. def.silentDbKey
+    if def.extraCheckboxes then
+        for _, extra in ipairs(def.extraCheckboxes) do
+            extra.settingVariable = "MEMORYKEEPER_" .. extra.dbKey
+        end
+    end
     for _, event in ipairs(def.events) do
         captureTypeByEvent[event] = def
     end
@@ -392,6 +457,13 @@ local function ApplyDefaults()
         end
         if MemoryKeeperDB[def.silentDbKey] == nil then
             MemoryKeeperDB[def.silentDbKey] = def.defaultSilent
+        end
+        if def.extraCheckboxes then
+            for _, extra in ipairs(def.extraCheckboxes) do
+                if MemoryKeeperDB[extra.dbKey] == nil then
+                    MemoryKeeperDB[extra.dbKey] = extra.defaultEnabled
+                end
+            end
         end
     end
 end
@@ -434,10 +506,18 @@ addon:SetScript("OnEvent", function(self, event, ...)
         return
     end
 
-    if not MemoryKeeperDB[def.dbKey] then return end
-
-    local reason = def.describe(event, ...)
-    if not reason then return end
+    -- describe() runs only while the type is on, so a kill is judged against the
+    -- table before remember() writes it. remember() still runs when the type is
+    -- off, otherwise a kill taken while it was disabled would look new later.
+    local enabled = MemoryKeeperDB[def.dbKey]
+    local reason
+    if enabled then
+        reason = def.describe(event, ...)
+    end
+    if def.remember then
+        def.remember(event, ...)
+    end
+    if not enabled or not reason then return end
 
     local delay = MemoryKeeperDB.screenshotDelay or globalDefaults.screenshotDelay
     if def.maxDelay then
@@ -464,10 +544,17 @@ SLASH_MEMORYKEEPER2 = "/mk"
 local function PrintStatus()
     print("|cff66ccffMemoryKeeper|r status:")
     for _, def in ipairs(captureTypes) do
-        print(string.format("  %s: %s, silent: %s",
+        local extras = ""
+        if def.extraCheckboxes then
+            for _, extra in ipairs(def.extraCheckboxes) do
+                extras = extras .. string.format(", %s: %s", extra.label, MemoryKeeperDB[extra.dbKey] and "YES" or "NO")
+            end
+        end
+        print(string.format("  %s: %s, silent: %s%s",
             def.label,
             MemoryKeeperDB[def.dbKey] and "ON" or "OFF",
-            MemoryKeeperDB[def.silentDbKey] and "YES" or "NO"))
+            MemoryKeeperDB[def.silentDbKey] and "YES" or "NO",
+            extras))
     end
     print("  Cooldown:", MemoryKeeperDB.cooldown)
     print("  Screenshot delay:", MemoryKeeperDB.screenshotDelay)
