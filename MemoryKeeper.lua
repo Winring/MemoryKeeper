@@ -243,43 +243,220 @@ local function DescribeStandingChange(factionID, updatedStanding)
     return "Reputation: " .. tostring(standing) .. " with " .. tostring(data.name)
 end
 
--- The game only knows whether a boss is dead in the current weekly lockout, not
--- whether this character has ever killed it on a given difficulty. Kills are
--- stored per character in SavedVariables and last until that data is wiped.
-local function GetBossKillRecord()
+-- First-seen memories. The game will not tell us whether this character has
+-- ever killed a boss, timed a key, or finished a delve story; it only knows
+-- the current lockout or the run that just ended. Those firsts are stored per
+-- character until the SavedVariables are wiped. Presence of a key is the whole
+-- record: no screenshot flag, no timestamp.
+local function GetCharacterRecord(storeKey)
     local guid = UnitGUID("player")
     if not guid then return nil end
 
-    local byAddon = MemoryKeeperDB.killedBosses
-    if not byAddon then
-        byAddon = {}
-        MemoryKeeperDB.killedBosses = byAddon
+    local store = MemoryKeeperDB[storeKey]
+    if not store then
+        store = {}
+        MemoryKeeperDB[storeKey] = store
     end
 
-    local byCharacter = byAddon[guid]
+    local byCharacter = store[guid]
     if not byCharacter then
         byCharacter = {}
-        byAddon[guid] = byCharacter
+        store[guid] = byCharacter
     end
     return byCharacter
 end
 
-local function HasRecordedBossKill(encounterID, difficultyID)
-    local record = GetBossKillRecord()
-    if not record then return false end
-    local difficulties = record[encounterID]
-    return difficulties and difficulties[difficultyID] and true or false
+local STORE_BOSSES = "killedBosses"
+local STORE_MYTHIC_PLUS = "completedMythicPlusRuns"
+local STORE_DELVES = "completedDelveRuns"
+
+-- Hidden slash commands wipe these without touching settings:
+-- /mk cleandbuser this character, /mk cleandbfull every character on the account.
+local characterRecordStores = { STORE_BOSSES, STORE_MYTHIC_PLUS, STORE_DELVES }
+
+local function ClearCharacterRecords()
+    local guid = UnitGUID("player")
+    if not guid then return false end
+
+    for _, storeKey in ipairs(characterRecordStores) do
+        local store = MemoryKeeperDB[storeKey]
+        if store then
+            store[guid] = nil
+        end
+    end
+    return true
 end
 
-local function RecordBossKill(encounterID, difficultyID)
-    local record = GetBossKillRecord()
-    if not record then return end
-    local difficulties = record[encounterID]
-    if not difficulties then
-        difficulties = {}
-        record[encounterID] = difficulties
+local function ClearAllCharacterRecords()
+    for _, storeKey in ipairs(characterRecordStores) do
+        MemoryKeeperDB[storeKey] = nil
     end
-    difficulties[difficultyID] = true
+end
+
+local function HasRecordedPath(storeKey, ...)
+    local node = GetCharacterRecord(storeKey)
+    if not node then return false end
+    local count = select("#", ...)
+    for i = 1, count do
+        node = node[select(i, ...)]
+        if not node then return false end
+    end
+    return true
+end
+
+local function RecordPath(storeKey, ...)
+    local node = GetCharacterRecord(storeKey)
+    if not node then return end
+    local count = select("#", ...)
+    for i = 1, count - 1 do
+        local key = select(i, ...)
+        local child = node[key]
+        if not child then
+            child = {}
+            node[key] = child
+        end
+        node = child
+    end
+    node[select(count, ...)] = true
+end
+
+-- Practice keys are not a season score and must not consume the first real
+-- completion at that dungeon and level.
+local function GetMythicPlusRun()
+    local info = C_ChallengeMode.GetChallengeCompletionInfo()
+    if not info or info.practiceRun then return nil end
+
+    local seasonID = C_MythicPlus.GetCurrentSeason()
+    local mapID = info.mapChallengeModeID
+    local level = info.level
+    if not seasonID or seasonID == 0 or not mapID or not level then return nil end
+
+    local name = C_ChallengeMode.GetMapUIInfo(mapID)
+    return {
+        seasonID = seasonID,
+        mapID = mapID,
+        level = level,
+        name = name,
+    }
+end
+
+local function DescribeMythicPlusRun(run)
+    local title = run.name or tostring(run.mapID)
+    return "Mythic+ " .. title .. ", +" .. tostring(run.level)
+end
+
+-- Delves have no completion event of their own. The run is a scenario, and
+-- HasActiveDelve() can already be false when it finishes, so identity is
+-- snapshotted on the way in. Stories of the same delve are different scenarios
+-- (and historically different difficulty). instanceType "none" is the overworld;
+-- a leftover snapshot must not count Theatre Troupe.
+local activeDelveRun = nil
+
+local function IsInDelveContent()
+    return C_DelvesUI.HasActiveDelve() or C_ScenarioInfo.IsTieredEntranceScenario()
+end
+
+local function ReadDelveRun()
+    if not IsInDelveContent() then return nil end
+
+    local seasonID = C_DelvesUI.GetCurrentDelvesSeasonNumber()
+    local mapID = C_DelvesUI.GetDelveEntranceMapID()
+    if not mapID or mapID == 0 then
+        mapID = select(8, GetInstanceInfo())
+    end
+
+    local entranceType = C_DelvesUI.GetTieredEntranceType()
+    if entranceType == Enum.TieredEntranceType.Invalid then
+        if C_DelvesUI.IsInLair() then
+            entranceType = Enum.TieredEntranceType.Lairs
+        else
+            entranceType = Enum.TieredEntranceType.Delve
+        end
+    end
+
+    local story = C_ScenarioInfo.GetScenarioInfo()
+    local scenarioID = story and story.scenarioID
+    local storyName = story and story.name
+
+    local tierInfo = C_DelvesUI.GetActiveDelveTier()
+    local tier = tierInfo and tierInfo.tier
+
+    local title = C_DelvesUI.GetDelveEntranceTitleString()
+    if not title or title == "" then
+        title = GetInstanceInfo()
+    end
+
+    if not seasonID or seasonID == 0 or not mapID or mapID == 0 or not tier or tier == 0
+        or not scenarioID or scenarioID == 0 then
+        return nil
+    end
+
+    return {
+        seasonID = seasonID,
+        mapID = mapID,
+        entranceType = entranceType,
+        scenarioID = scenarioID,
+        tier = tier,
+        title = title,
+        storyName = storyName,
+    }
+end
+
+local function RefreshActiveDelveRun()
+    local run = ReadDelveRun()
+    if run then
+        activeDelveRun = run
+    end
+end
+
+local function ClearInactiveDelveRun()
+    if IsInDelveContent() then return end
+    activeDelveRun = nil
+end
+
+local function GetDelveRun()
+    RefreshActiveDelveRun()
+    if not activeDelveRun then return nil end
+    if not IsInDelveContent() and select(2, GetInstanceInfo()) == "none" then
+        return nil
+    end
+    return activeDelveRun
+end
+
+local function DescribeDelveRun(run)
+    local kind = "Delve"
+    if run.entranceType == Enum.TieredEntranceType.Lairs then
+        kind = "Lair"
+    end
+    local title = run.title or tostring(run.mapID)
+    local story = run.storyName or tostring(run.scenarioID)
+    return kind .. " " .. title .. ": " .. story .. ", tier " .. tostring(run.tier)
+end
+
+-- CRITERIA_EARNED payload is (achievementID, description, achievementAlreadyEarnedOnAccount).
+-- There is no criterion ID, only the achievement the step belongs to.
+local function DescribeAchievement(event, achievementID, description)
+    local name = select(2, GetAchievementInfo(achievementID)) or tostring(achievementID)
+    if event == "CRITERIA_EARNED" then
+        return "Achievement step: " .. name .. ": " .. tostring(description)
+    end
+    return "Achievement: " .. name
+end
+
+local function DescribeBossKill(encounterName, difficultyID)
+    local difficulty = GetDifficultyInfo(difficultyID)
+    if difficulty then
+        return "Boss " .. tostring(encounterName) .. ", " .. difficulty
+    end
+    return "Boss " .. tostring(encounterName)
+end
+
+local function DescribePvPMatch()
+    local name = GetInstanceInfo()
+    if name and name ~= "" then
+        return "PvP: " .. name
+    end
+    return "PvP match complete"
 end
 
 -- Every capture type is described exactly once here. Event registration, event
@@ -289,7 +466,8 @@ end
 -- describe() receives the event name followed by the event's own payload and
 -- returns the debug text for the screenshot, or nil to skip capturing entirely.
 -- extraCheckboxes are shown indented under the type. remember() records state
--- even while the type is switched off.
+-- even while the type is switched off. eventMaxDelay caps the screenshot delay
+-- for specific events of a type that owns more than one.
 local captureTypes = {
     {
         key = "achievement",
@@ -299,31 +477,27 @@ local captureTypes = {
         silentDbKey = "silentAchievement",
         defaultEnabled = true,
         defaultSilent = false,
-        events = { "ACHIEVEMENT_EARNED" },
-        describe = function(event, achievementID)
-            return "Achievement " .. tostring(achievementID)
-        end,
-    },
-    {
-        key = "criteria",
-        label = "Achievement criteria / steps",
-        tooltip = "Capture a screenshot whenever a single step of an achievement is completed.",
-        dbKey = "criteria",
-        silentDbKey = "silentCriteria",
-        defaultEnabled = true,
-        defaultSilent = false,
-        maxDelay = 0.6,
-        events = { "CRITERIA_EARNED" },
+        extraCheckboxes = {
+            {
+                dbKey = "criteria",
+                label = "Criteria / steps",
+                tooltip = "Also photograph each completed achievement step.",
+                defaultEnabled = true,
+            },
+        },
+        eventMaxDelay = { CRITERIA_EARNED = 0.6 },
+        events = { "ACHIEVEMENT_EARNED", "CRITERIA_EARNED" },
         describe = function(event, achievementID, description)
-            -- Payload is (achievementID, description, achievementAlreadyEarnedOnAccount).
-            -- There is no criterion ID, only the achievement the step belongs to.
-            return "Criterion of achievement " .. tostring(achievementID) .. ": " .. tostring(description)
+            if event == "CRITERIA_EARNED" and not MemoryKeeperDB.criteria then
+                return nil
+            end
+            return DescribeAchievement(event, achievementID, description)
         end,
     },
     {
         key = "boss",
         label = "Boss kills",
-        tooltip = "Capture a screenshot after a boss kill.",
+        tooltip = "Capture a screenshot of the first kill of each boss on each difficulty.",
         dbKey = "boss",
         silentDbKey = "silentBoss",
         defaultEnabled = true,
@@ -339,31 +513,85 @@ local captureTypes = {
         events = { "ENCOUNTER_END" },
         describe = function(event, encounterID, encounterName, difficultyID, groupSize, success)
             if success ~= 1 then return nil end
-            if not MemoryKeeperDB.bossEveryKill and HasRecordedBossKill(encounterID, difficultyID) then
+            if not MemoryKeeperDB.bossEveryKill and HasRecordedPath(STORE_BOSSES, encounterID, difficultyID) then
                 return nil
             end
-            return "Boss kill: " .. tostring(encounterName)
+            return DescribeBossKill(encounterName, difficultyID)
         end,
-        -- Written after describe() so the first kill is still judged unseen.
-        -- Runs while the category is off so a later enable does not treat that
-        -- kill as new.
         remember = function(event, encounterID, encounterName, difficultyID, groupSize, success)
             if success == 1 then
-                RecordBossKill(encounterID, difficultyID)
+                RecordPath(STORE_BOSSES, encounterID, difficultyID)
             end
         end,
     },
     {
         key = "mythicPlus",
         label = "Mythic+ completions",
-        tooltip = "Capture a screenshot when a Mythic+ dungeon is completed.",
+        tooltip = "Capture a screenshot of the first key at each level in each dungeon, each season.",
         dbKey = "mythicPlus",
         silentDbKey = "silentMythicPlus",
         defaultEnabled = true,
         defaultSilent = false,
+        extraCheckboxes = {
+            {
+                dbKey = "mythicPlusEveryCompletion",
+                label = "Every completion",
+                tooltip = "Photograph every completed key instead of only the first at each level in each dungeon.",
+                defaultEnabled = false,
+            },
+        },
         events = { "CHALLENGE_MODE_COMPLETED" },
         describe = function()
-            return "Mythic+ completed"
+            local run = GetMythicPlusRun()
+            if not run then return nil end
+            if not MemoryKeeperDB.mythicPlusEveryCompletion and HasRecordedPath(STORE_MYTHIC_PLUS, run.seasonID, run.mapID, run.level) then
+                return nil
+            end
+            return DescribeMythicPlusRun(run)
+        end,
+        remember = function()
+            local run = GetMythicPlusRun()
+            if run then
+                RecordPath(STORE_MYTHIC_PLUS, run.seasonID, run.mapID, run.level)
+            end
+        end,
+    },
+    {
+        key = "delve",
+        label = "Delve completions",
+        tooltip = "Capture a screenshot of the first completion of each story of each delve or lair at each tier, each season.",
+        dbKey = "delve",
+        silentDbKey = "silentDelve",
+        defaultEnabled = true,
+        defaultSilent = false,
+        extraCheckboxes = {
+            {
+                dbKey = "delveEveryCompletion",
+                label = "Every completion",
+                tooltip = "Photograph every completed delve or lair instead of only the first of each story at each tier.",
+                defaultEnabled = false,
+            },
+        },
+        events = { "SCENARIO_COMPLETED", "SCENARIO_UPDATE", "WALK_IN_DATA_UPDATE", "ACTIVE_DELVE_DATA_UPDATE", "PLAYER_ENTERING_WORLD" },
+        describe = function(event)
+            if event ~= "SCENARIO_COMPLETED" then return nil end
+            local run = GetDelveRun()
+            if not run then return nil end
+            if not MemoryKeeperDB.delveEveryCompletion and HasRecordedPath(STORE_DELVES, run.seasonID, run.mapID, run.entranceType, run.scenarioID, run.tier) then
+                return nil
+            end
+            return DescribeDelveRun(run)
+        end,
+        remember = function(event)
+            if event ~= "SCENARIO_COMPLETED" then
+                RefreshActiveDelveRun()
+                ClearInactiveDelveRun()
+                return
+            end
+            local run = GetDelveRun()
+            if run then
+                RecordPath(STORE_DELVES, run.seasonID, run.mapID, run.entranceType, run.scenarioID, run.tier)
+            end
         end,
     },
     {
@@ -389,7 +617,7 @@ local captureTypes = {
         defaultSilent = false,
         events = { "PVP_MATCH_COMPLETE" },
         describe = function()
-            return "PvP match complete"
+            return DescribePvPMatch()
         end,
     },
     {
@@ -506,9 +734,9 @@ addon:SetScript("OnEvent", function(self, event, ...)
         return
     end
 
-    -- describe() runs only while the type is on, so a kill is judged against the
-    -- table before remember() writes it. remember() still runs when the type is
-    -- off, otherwise a kill taken while it was disabled would look new later.
+    -- describe() runs only while the type is on, so a first is judged against
+    -- the table before remember() writes it. remember() still runs when the type
+    -- is off, otherwise an event taken while it was disabled would look new later.
     local enabled = MemoryKeeperDB[def.dbKey]
     local reason
     if enabled then
@@ -520,23 +748,16 @@ addon:SetScript("OnEvent", function(self, event, ...)
     if not enabled or not reason then return end
 
     local delay = MemoryKeeperDB.screenshotDelay or globalDefaults.screenshotDelay
-    if def.maxDelay then
-        delay = math.min(delay, def.maxDelay)
+    local maxDelay = def.maxDelay
+    if def.eventMaxDelay then
+        maxDelay = def.eventMaxDelay[event] or maxDelay
+    end
+    if maxDelay then
+        delay = math.min(delay, maxDelay)
     end
 
     QueueScreenshot(reason, delay, MemoryKeeperDB[def.silentDbKey], def.key)
 end)
-
--- Route writes through the settings object when it exists so an open settings
--- panel updates immediately instead of showing a stale checkbox.
-local function SetCaptureEnabled(def, enabled)
-    local setting = Settings and Settings.GetSetting and Settings.GetSetting(def.settingVariable)
-    if setting then
-        setting:SetValue(enabled)
-    else
-        MemoryKeeperDB[def.dbKey] = enabled
-    end
-end
 
 SLASH_MEMORYKEEPER1 = "/memorykeeper"
 SLASH_MEMORYKEEPER2 = "/mk"
@@ -564,16 +785,18 @@ end
 SlashCmdList.MEMORYKEEPER = function(msg)
     msg = (msg or ""):lower():match("^%s*(.-)%s*$")
 
-    if msg == "on" or msg == "off" then
-        local enabled = msg == "on"
-        SetCaptureEnabled(captureTypeByEvent["ACHIEVEMENT_EARNED"], enabled)
-        SetCaptureEnabled(captureTypeByEvent["CRITERIA_EARNED"], enabled)
-        print("|cff66ccffMemoryKeeper|r: achievement and criterion screenshots " .. (enabled and "enabled." or "disabled."))
-    elseif msg == "status" then
+    if msg == "status" then
         PrintStatus()
     elseif msg == "debug" then
         MemoryKeeperDB.debug = not MemoryKeeperDB.debug
         print("|cff66ccffMemoryKeeper|r debug:", MemoryKeeperDB.debug and "ON" or "OFF")
+    elseif msg == "cleandbuser" then
+        if ClearCharacterRecords() then
+            print("|cff66ccffMemoryKeeper|r: cleared this character's boss, Mythic+ and delve history.")
+        end
+    elseif msg == "cleandbfull" then
+        ClearAllCharacterRecords()
+        print("|cff66ccffMemoryKeeper|r: cleared boss, Mythic+ and delve history for all characters.")
     elseif MemoryKeeper_OpenOptions then
         MemoryKeeper_OpenOptions()
     end

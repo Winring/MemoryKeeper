@@ -13,4 +13,8 @@ V1.1.2
 - Reputation screenshots only on an actual rank change instead of every point
 
 V1.1.3
-- Boss kills default to the first kill of each boss on each difficulty, with an option to photograph every kill
+- Boss kills photograph only the first kill of each boss on each difficulty, with an option for every kill
+- Achievement steps are now an option under Achievements
+- `/memorykeeper on` and `/off` are gone; turn each type on and off in the settings panel
+- Mythic+ completions photograph the first key at each level in each dungeon each season, with an option for every completion
+- Delve completions photograph the first run of each story of each delve or lair at each tier each season, with an option for every completion
