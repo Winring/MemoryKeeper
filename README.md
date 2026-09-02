@@ -10,9 +10,11 @@ MemoryKeeper automatically takes screenshots when something worth remembering ha
 * Boss-kill screenshots
 * Mythic+ completion screenshots
 * Delve completion screenshots
+* Delve companion level screenshots
 * Level-up screenshots
 * PvP match completion screenshots
 * Reputation rank screenshots
+* Renown screenshots
 * In-game cinematic screenshots
 * Settings integrated into the game's own options panel
 
@@ -26,8 +28,10 @@ MemoryKeeper automatically takes screenshots when something worth remembering ha
 * Boss kills photograph the first kill of each boss on each difficulty, with an option for every kill
 * Mythic+ completions photograph the first key at each level in each dungeon each season, with an option for every completion
 * Delve completions photograph the first run of each story at each tier in each delve each season, with an option for every completion
+* Delve companion levels photograph each level of Brann or Valeera
 * PvP and reputation capturing start switched off
-* Reputation covers classic standings, friendship ranks and renown levels, and is only captured when a rank actually moves, in either direction, never on plain point gains
+* Reputation covers classic standings and friendship ranks, and is only captured when a rank actually moves, in either direction, never on plain point gains
+* Renown photographs major-faction and covenant renown level changes
 * In-game cinematics take a screenshot 2 seconds after starting, then every 5 seconds until the cinematic ends
 * Works quietly in the background while you play
 

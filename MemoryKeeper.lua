@@ -3,9 +3,6 @@ local ADDON_NAME, MK = ...
 local addon = CreateFrame("Frame")
 local pendingTimers = {}
 local lastScreenshotTime = {}
-local cinematicActive = false
-local cinematicToken = 0
-local cinematicTicker = nil
 
 MemoryKeeperDB = MemoryKeeperDB or {}
 
@@ -116,138 +113,19 @@ local function QueueScreenshot(reason, delay, silent, category)
     pendingTimers[category] = timer
 end
 
-local function HandleCinematic(def, event)
-    if event == "CINEMATIC_STOP" then
-        -- Handled even when capturing is switched off, because a cinematic that
-        -- started while it was on must still be able to stop its ticker.
-        if not cinematicActive then return end
-        cinematicActive = false
-        cinematicToken = cinematicToken + 1
-        if cinematicTicker then
-            cinematicTicker:Cancel()
-            cinematicTicker = nil
-        end
-        return
-    end
-
-    if not MemoryKeeperDB[def.dbKey] then return end
-
-    -- Only capture Blizzard's in-engine cinematic scenes/cutscenes.
-    if not IsInCinematicScene() then return end
-
-    cinematicActive = true
-    cinematicToken = cinematicToken + 1
-    local token = cinematicToken
-    local silent = MemoryKeeperDB[def.silentDbKey]
-
-    if cinematicTicker then
-        cinematicTicker:Cancel()
-        cinematicTicker = nil
-    end
-
-    -- First screenshot after 2 seconds, then every 5 seconds until the cinematic ends.
-    -- The token lets a newly started cinematic invalidate tickers from a previous one.
-    C_Timer.After(2, function()
-        if not cinematicActive or token ~= cinematicToken then return end
-        DoScreenshot("In-game cinematic", silent, def.key)
-
-        cinematicTicker = C_Timer.NewTicker(5, function()
-            if not cinematicActive or token ~= cinematicToken then
-                if cinematicTicker then
-                    cinematicTicker:Cancel()
-                    cinematicTicker = nil
-                end
-                return
-            end
-            DoScreenshot("In-game cinematic", silent, def.key)
-        end)
-    end)
-end
-
--- FACTION_STANDING_CHANGED carries the new reputation total and fires on every
--- single point gained, so the previous rank is the only way to tell a real
--- promotion from ordinary grinding. This table is session state, not saved data.
-local factionRanks = {}
-
--- Ranks come in two flavours the game reads differently: friendship factions
--- (Tillers, Brann) expose a numbered rank, everything else the classic
--- Hated..Exalted reaction. Paragon is left out on purpose, a refilled bar past
--- the last rank is grinding rather than a promotion.
--- Returns a number that only moves on an actual rank change, plus its display name.
-local function GetFactionRank(factionID)
-    local friendship = C_GossipInfo.GetFriendshipReputation(factionID)
-    if friendship and friendship.friendshipFactionID > 0 then
-        local ranks = C_GossipInfo.GetFriendshipReputationRanks(friendship.friendshipFactionID)
-        if not ranks or ranks.maxLevel == 0 then return nil end
-        return ranks.currentLevel, friendship.reaction
-    end
-
-    local data = C_Reputation.GetFactionDataByID(factionID)
-    if not data then return nil end
-
-    local standing = GetText("FACTION_STANDING_LABEL" .. data.reaction, UnitSex("player"))
-        or ("Standing " .. data.reaction)
-
-    return data.reaction, standing
-end
-
--- The game has no call that hands over every faction, and the one list it does
--- offer mirrors the reputation panel, where a collapsed header hides its factions.
--- Asking about the IDs one by one reaches every faction the character has and
--- cannot be influenced by anything the panel is doing. The bound only has to stay
--- above the highest faction in the game; IDs that belong to none cost a lookup
--- returning nothing.
-local MAX_FACTION_ID = 4000
-
--- Taken at login, and again whenever the category is switched back on, because
--- nothing is tracked while it is off and stale ranks would report a change that
--- already happened as if it were new.
-local function SnapshotFactionRanks()
-    wipe(factionRanks)
-    debugprofilestart()
-
-    local recorded = 0
-    for factionID = 1, MAX_FACTION_ID do
-        if C_Reputation.GetFactionDataByID(factionID) then
-            local rank = GetFactionRank(factionID)
-            factionRanks[factionID] = rank
-            if rank then
-                recorded = recorded + 1
-            end
-        end
-    end
-
-    Debug(string.format("Recorded the rank of %d factions in %.1f ms", recorded, debugprofilestop()))
-end
-
-local function DescribeStandingChange(factionID, updatedStanding)
-    -- Major factions announce their renown on their own event, so all this one
-    -- would ever tell us about them is that points moved.
-    if C_Reputation.IsMajorFaction(factionID) then return nil end
-
-    local data = C_Reputation.GetFactionDataByID(factionID)
-    if not data then return nil end
-
-    -- The band the new total lands in shows how far the next rank still is.
-    Debug(string.format("%s: %d in band %d-%d, reaction %d",
-        data.name, updatedStanding or -1, data.currentReactionThreshold,
-        data.nextReactionThreshold, data.reaction))
-
-    local rank, standing = GetFactionRank(factionID)
-    if not rank then return nil end
-
-    local previous = factionRanks[factionID]
-    factionRanks[factionID] = rank
-    if previous == nil or previous == rank then return nil end
-
-    return "Reputation: " .. tostring(standing) .. " with " .. tostring(data.name)
-end
-
 -- First-seen memories. The game will not tell us whether this character has
 -- ever killed a boss, timed a key, or finished a delve story; it only knows
 -- the current lockout or the run that just ended. Those firsts are stored per
 -- character until the SavedVariables are wiped. Presence of a key is the whole
 -- record: no screenshot flag, no timestamp.
+--
+-- Hidden slash commands wipe these without touching settings:
+-- /mk cleandbuser this character, /mk cleandbfull every character on the account.
+local STORE_BOSSES = "killedBosses"
+local STORE_MYTHIC_PLUS = "completedMythicPlusRuns"
+local STORE_DELVES = "completedDelveRuns"
+local characterRecordStores = { STORE_BOSSES, STORE_MYTHIC_PLUS, STORE_DELVES }
+
 local function GetCharacterRecord(storeKey)
     local guid = UnitGUID("player")
     if not guid then return nil end
@@ -265,14 +143,6 @@ local function GetCharacterRecord(storeKey)
     end
     return byCharacter
 end
-
-local STORE_BOSSES = "killedBosses"
-local STORE_MYTHIC_PLUS = "completedMythicPlusRuns"
-local STORE_DELVES = "completedDelveRuns"
-
--- Hidden slash commands wipe these without touching settings:
--- /mk cleandbuser this character, /mk cleandbfull every character on the account.
-local characterRecordStores = { STORE_BOSSES, STORE_MYTHIC_PLUS, STORE_DELVES }
 
 local function ClearCharacterRecords()
     local guid = UnitGUID("player")
@@ -338,11 +208,6 @@ local function GetMythicPlusRun()
         level = level,
         name = name,
     }
-end
-
-local function DescribeMythicPlusRun(run)
-    local title = run.name or tostring(run.mapID)
-    return "Mythic+ " .. title .. ", +" .. tostring(run.level)
 end
 
 -- Delves have no completion event of their own. The run is a scenario, and
@@ -423,14 +288,124 @@ local function GetDelveRun()
     return activeDelveRun
 end
 
-local function DescribeDelveRun(run)
-    local kind = "Delve"
-    if run.entranceType == Enum.TieredEntranceType.Lairs then
-        kind = "Lair"
+-- Companion levels are the number on the delve companion panel. That panel
+-- reads GetFriendshipReputationRanks with the companion faction ID.
+-- FACTION_STANDING_CHANGED still fires for every XP tick; the level is
+-- ranks.currentLevel. Journey major factions carry playerCompanionID.
+-- GetMajorFactionIDs takes an expansion in Blizzard's UI, so every expansion
+-- must be asked or the other expansion's companion is missing.
+local companionFactionIDs = {}
+local companionLevels = {}
+
+local function NoteCompanionFaction(factionID)
+    if factionID and factionID > 0 then
+        companionFactionIDs[factionID] = true
     end
-    local title = run.title or tostring(run.mapID)
-    local story = run.storyName or tostring(run.scenarioID)
-    return kind .. " " .. title .. ": " .. story .. ", tier " .. tostring(run.tier)
+end
+
+local function RefreshCompanionFactionIDs()
+    wipe(companionFactionIDs)
+    NoteCompanionFaction(C_DelvesUI.GetFactionForCompanion())
+    local activeCompanion = C_DelvesUI.GetCompanionInfoForActivePlayer()
+    if activeCompanion and activeCompanion > 0 then
+        NoteCompanionFaction(C_DelvesUI.GetFactionForCompanion(activeCompanion))
+    end
+    local maxExpansion = LE_EXPANSION_LEVEL_CURRENT or 0
+    for expansionID = 0, maxExpansion do
+        local majorIDs = C_MajorFactions.GetMajorFactionIDs(expansionID)
+        if majorIDs then
+            for i = 1, #majorIDs do
+                local data = C_MajorFactions.GetMajorFactionData(majorIDs[i])
+                if data and data.playerCompanionID then
+                    NoteCompanionFaction(C_DelvesUI.GetFactionForCompanion(data.playerCompanionID))
+                end
+            end
+        end
+    end
+end
+
+local function IsDelveCompanionFaction(factionID)
+    if companionFactionIDs[factionID] then return true end
+    if C_DelvesUI.GetFactionForCompanion() == factionID then
+        companionFactionIDs[factionID] = true
+        return true
+    end
+    return false
+end
+
+local function GetCompanionLevel(factionID)
+    local ranks = C_GossipInfo.GetFriendshipReputationRanks(factionID)
+    if not ranks or ranks.maxLevel == 0 then return nil end
+    return ranks.currentLevel, ranks.maxLevel
+end
+
+local function SnapshotCompanionLevels()
+    RefreshCompanionFactionIDs()
+    wipe(companionLevels)
+    for factionID in pairs(companionFactionIDs) do
+        companionLevels[factionID] = GetCompanionLevel(factionID)
+    end
+end
+
+-- FACTION_STANDING_CHANGED carries the new reputation total and fires on every
+-- single point gained, so the previous rank is the only way to tell a real
+-- promotion from ordinary grinding. This table is session state, not saved data.
+local factionRanks = {}
+
+-- The game has no call that hands over every faction, and the one list it does
+-- offer mirrors the reputation panel, where a collapsed header hides its factions.
+-- Asking about the IDs one by one reaches every faction the character has and
+-- cannot be influenced by anything the panel is doing. The bound only has to stay
+-- above the highest faction in the game; IDs that belong to none cost a lookup
+-- returning nothing.
+local MAX_FACTION_ID = 4000
+
+-- Ranks come in two flavours the game reads differently: friendship factions
+-- (Tillers) expose a numbered rank, everything else the classic
+-- Hated..Exalted reaction. Paragon is left out on purpose, a refilled bar past
+-- the last rank is grinding rather than a promotion. Delve companions pass the
+-- friendship test, but the number on their panel is currentLevel, not a rank
+-- in this list.
+-- Returns a number that only moves on an actual rank change, plus its display name.
+local function GetFactionRank(factionID)
+    if IsDelveCompanionFaction(factionID) then return nil end
+
+    local friendship = C_GossipInfo.GetFriendshipReputation(factionID)
+    if friendship and friendship.friendshipFactionID > 0 then
+        local ranks = C_GossipInfo.GetFriendshipReputationRanks(friendship.friendshipFactionID)
+        if not ranks or ranks.maxLevel == 0 then return nil end
+        return ranks.currentLevel, friendship.reaction
+    end
+
+    local data = C_Reputation.GetFactionDataByID(factionID)
+    if not data then return nil end
+
+    local standing = GetText("FACTION_STANDING_LABEL" .. data.reaction, UnitSex("player"))
+        or ("Standing " .. data.reaction)
+
+    return data.reaction, standing
+end
+
+-- Taken at login, and again whenever the category is switched back on, because
+-- nothing is tracked while it is off and stale ranks would report a change that
+-- already happened as if it were new.
+local function SnapshotFactionRanks()
+    RefreshCompanionFactionIDs()
+    wipe(factionRanks)
+    debugprofilestart()
+
+    local recorded = 0
+    for factionID = 1, MAX_FACTION_ID do
+        if C_Reputation.GetFactionDataByID(factionID) then
+            local rank = GetFactionRank(factionID)
+            factionRanks[factionID] = rank
+            if rank then
+                recorded = recorded + 1
+            end
+        end
+    end
+
+    Debug(string.format("Recorded the rank of %d factions in %.1f ms", recorded, debugprofilestop()))
 end
 
 -- CRITERIA_EARNED payload is (achievementID, description, achievementAlreadyEarnedOnAccount).
@@ -451,12 +426,123 @@ local function DescribeBossKill(encounterName, difficultyID)
     return "Boss " .. tostring(encounterName)
 end
 
+local function DescribeMythicPlusRun(run)
+    local title = run.name or tostring(run.mapID)
+    return "Mythic+ " .. title .. ", +" .. tostring(run.level)
+end
+
+local function DescribeDelveRun(run)
+    local kind = "Delve"
+    if run.entranceType == Enum.TieredEntranceType.Lairs then
+        kind = "Lair"
+    end
+    local title = run.title or tostring(run.mapID)
+    local story = run.storyName or tostring(run.scenarioID)
+    return kind .. " " .. title .. ": " .. story .. ", tier " .. tostring(run.tier)
+end
+
+local function DescribeCompanionLevel(event, factionID, updatedStanding)
+    if not IsDelveCompanionFaction(factionID) then return nil end
+
+    local data = C_Reputation.GetFactionDataByID(factionID)
+    local name = data and data.name or tostring(factionID)
+    local level, maxLevel = GetCompanionLevel(factionID)
+    Debug(string.format("%s: companion standing %d, level %s / %s",
+        name, updatedStanding or -1,
+        level and tostring(level) or "?",
+        maxLevel and tostring(maxLevel) or "?"))
+
+    if not level then return nil end
+    local previous = companionLevels[factionID]
+    companionLevels[factionID] = level
+    if previous == nil or previous == level then return nil end
+    return "Delve companion: " .. tostring(name) .. ", level " .. tostring(level)
+end
+
 local function DescribePvPMatch()
     local name = GetInstanceInfo()
     if name and name ~= "" then
         return "PvP: " .. name
     end
     return "PvP match complete"
+end
+
+local function DescribeStandingChange(factionID, updatedStanding)
+    -- Major factions announce their renown on their own event, so all this one
+    -- would ever tell us about them is that points moved. Delve companions pass
+    -- the friendship test, but their level is the companion panel's currentLevel.
+    if C_Reputation.IsMajorFaction(factionID) or IsDelveCompanionFaction(factionID) then
+        return nil
+    end
+
+    local data = C_Reputation.GetFactionDataByID(factionID)
+    if not data then return nil end
+
+    -- The band the new total lands in shows how far the next rank still is.
+    Debug(string.format("%s: %d in band %d-%d, reaction %d",
+        data.name, updatedStanding or -1, data.currentReactionThreshold,
+        data.nextReactionThreshold, data.reaction))
+
+    local rank, standing = GetFactionRank(factionID)
+    if not rank then return nil end
+
+    local previous = factionRanks[factionID]
+    factionRanks[factionID] = rank
+    if previous == nil or previous == rank then return nil end
+
+    return "Reputation: " .. tostring(standing) .. " with " .. tostring(data.name)
+end
+
+local cinematicActive = false
+local cinematicToken = 0
+local cinematicTicker = nil
+
+local function HandleCinematic(def, event)
+    if event == "CINEMATIC_STOP" then
+        -- Handled even when capturing is switched off, because a cinematic that
+        -- started while it was on must still be able to stop its ticker.
+        if not cinematicActive then return end
+        cinematicActive = false
+        cinematicToken = cinematicToken + 1
+        if cinematicTicker then
+            cinematicTicker:Cancel()
+            cinematicTicker = nil
+        end
+        return
+    end
+
+    if not MemoryKeeperDB[def.dbKey] then return end
+
+    -- Only capture Blizzard's in-engine cinematic scenes/cutscenes.
+    if not IsInCinematicScene() then return end
+
+    cinematicActive = true
+    cinematicToken = cinematicToken + 1
+    local token = cinematicToken
+    local silent = MemoryKeeperDB[def.silentDbKey]
+
+    if cinematicTicker then
+        cinematicTicker:Cancel()
+        cinematicTicker = nil
+    end
+
+    -- First screenshot after 2 seconds, then every 5 seconds until the cinematic ends.
+    -- The token lets a newly started cinematic invalidate tickers from a previous one.
+    C_Timer.After(2, function()
+        if not cinematicActive or token ~= cinematicToken then return end
+        DoScreenshot("In-game cinematic", silent, def.key)
+
+        cinematicTicker = C_Timer.NewTicker(5, function()
+            if not cinematicActive or token ~= cinematicToken then
+                if cinematicTicker then
+                    cinematicTicker:Cancel()
+                    cinematicTicker = nil
+                end
+                return
+            end
+            DoScreenshot("In-game cinematic", silent, def.key)
+        end)
+    end)
 end
 
 -- Every capture type is described exactly once here. Event registration, event
@@ -468,6 +554,10 @@ end
 -- extraCheckboxes are shown indented under the type. remember() records state
 -- even while the type is switched off. eventMaxDelay caps the screenshot delay
 -- for specific events of a type that owns more than one.
+--
+-- Types list the events they care about. The game uses one standing event for
+-- classic ranks, friendship, and companion XP, so more than one type may list
+-- the same event.
 local captureTypes = {
     {
         key = "achievement",
@@ -595,6 +685,18 @@ local captureTypes = {
         end,
     },
     {
+        key = "companion",
+        label = "Delve companion levels",
+        tooltip = "Capture a screenshot when Brann or Valeera gains a companion level.",
+        dbKey = "companion",
+        silentDbKey = "silentCompanion",
+        defaultEnabled = true,
+        defaultSilent = false,
+        events = { "FACTION_STANDING_CHANGED" },
+        reset = SnapshotCompanionLevels,
+        describe = DescribeCompanionLevel,
+    },
+    {
         key = "levelUp",
         label = "Level ups",
         tooltip = "Capture a screenshot when this character gains a level.",
@@ -623,25 +725,34 @@ local captureTypes = {
     {
         key = "reputation",
         label = "Reputation milestones",
-        tooltip = "Capture a screenshot when a faction rank or renown level changes, in either direction.",
+        tooltip = "Capture a screenshot when a classic faction standing or friendship rank changes, in either direction.",
         dbKey = "reputation",
         silentDbKey = "silentReputation",
         defaultEnabled = false,
         defaultSilent = false,
-        events = { "FACTION_STANDING_CHANGED", "MAJOR_FACTION_RENOWN_LEVEL_CHANGED", "COVENANT_SANCTUM_RENOWN_LEVEL_CHANGED" },
+        events = { "FACTION_STANDING_CHANGED" },
         reset = SnapshotFactionRanks,
+        describe = function(event, factionID, updatedStanding)
+            return DescribeStandingChange(factionID, updatedStanding)
+        end,
+    },
+    {
+        key = "renown",
+        label = "Renown",
+        tooltip = "Capture a screenshot when a major-faction or covenant renown level changes.",
+        dbKey = "renown",
+        silentDbKey = "silentRenown",
+        defaultEnabled = true,
+        defaultSilent = false,
+        events = { "MAJOR_FACTION_RENOWN_LEVEL_CHANGED", "COVENANT_SANCTUM_RENOWN_LEVEL_CHANGED" },
         describe = function(event, ...)
             if event == "MAJOR_FACTION_RENOWN_LEVEL_CHANGED" then
                 local majorFactionID, newRenownLevel = ...
                 local data = C_MajorFactions.GetMajorFactionData(majorFactionID)
                 return "Renown " .. tostring(newRenownLevel) .. " with " .. tostring(data and data.name or majorFactionID)
-            elseif event == "COVENANT_SANCTUM_RENOWN_LEVEL_CHANGED" then
-                local newRenownLevel = ...
-                return "Covenant renown " .. tostring(newRenownLevel)
             end
-
-            local factionID, updatedStanding = ...
-            return DescribeStandingChange(factionID, updatedStanding)
+            local newRenownLevel = ...
+            return "Covenant renown " .. tostring(newRenownLevel)
         end,
     },
     {
@@ -667,7 +778,12 @@ for _, def in ipairs(captureTypes) do
         end
     end
     for _, event in ipairs(def.events) do
-        captureTypeByEvent[event] = def
+        local list = captureTypeByEvent[event]
+        if not list then
+            list = {}
+            captureTypeByEvent[event] = list
+        end
+        list[#list + 1] = def
     end
 end
 
@@ -724,39 +840,41 @@ addon:SetScript("OnEvent", function(self, event, ...)
         return
     end
 
-    local def = captureTypeByEvent[event]
-    if not def then return end
+    local defs = captureTypeByEvent[event]
+    if not defs then return end
+    for i = 1, #defs do
+        local def = defs[i]
 
-    -- Types with a custom handler check the enabled flag themselves, because some
-    -- of their events must run regardless of it.
-    if def.handler then
-        def.handler(def, event, ...)
-        return
-    end
+        -- Types with a custom handler check the enabled flag themselves, because some
+        -- of their events must run regardless of it.
+        if def.handler then
+            def.handler(def, event, ...)
+        else
+            -- describe() runs only while the type is on, so a first is judged against
+            -- the table before remember() writes it. remember() still runs when the type
+            -- is off, otherwise an event taken while it was disabled would look new later.
+            local enabled = MemoryKeeperDB[def.dbKey]
+            local reason
+            if enabled then
+                reason = def.describe(event, ...)
+            end
+            if def.remember then
+                def.remember(event, ...)
+            end
+            if enabled and reason then
+                local delay = MemoryKeeperDB.screenshotDelay or globalDefaults.screenshotDelay
+                local maxDelay = def.maxDelay
+                if def.eventMaxDelay then
+                    maxDelay = def.eventMaxDelay[event] or maxDelay
+                end
+                if maxDelay then
+                    delay = math.min(delay, maxDelay)
+                end
 
-    -- describe() runs only while the type is on, so a first is judged against
-    -- the table before remember() writes it. remember() still runs when the type
-    -- is off, otherwise an event taken while it was disabled would look new later.
-    local enabled = MemoryKeeperDB[def.dbKey]
-    local reason
-    if enabled then
-        reason = def.describe(event, ...)
+                QueueScreenshot(reason, delay, MemoryKeeperDB[def.silentDbKey], def.key)
+            end
+        end
     end
-    if def.remember then
-        def.remember(event, ...)
-    end
-    if not enabled or not reason then return end
-
-    local delay = MemoryKeeperDB.screenshotDelay or globalDefaults.screenshotDelay
-    local maxDelay = def.maxDelay
-    if def.eventMaxDelay then
-        maxDelay = def.eventMaxDelay[event] or maxDelay
-    end
-    if maxDelay then
-        delay = math.min(delay, maxDelay)
-    end
-
-    QueueScreenshot(reason, delay, MemoryKeeperDB[def.silentDbKey], def.key)
 end)
 
 SLASH_MEMORYKEEPER1 = "/memorykeeper"

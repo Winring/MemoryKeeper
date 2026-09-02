@@ -18,3 +18,8 @@ V1.1.3
 - `/memorykeeper on` and `/off` are gone; turn each type on and off in the settings panel
 - Mythic+ completions photograph the first key at each level in each dungeon each season, with an option for every completion
 - Delve completions photograph the first run of each story of each delve or lair at each tier each season, with an option for every completion
+
+V1.1.4
+- Delve companion levels (Brann, Valeera) are their own option and start switched on
+- Renown is its own option and starts switched on
+- Reputation milestones no longer include companion levels or renown
