@@ -25,7 +25,7 @@ MemoryKeeper automatically takes screenshots when something worth remembering ha
 
 * Enable or disable each event type independently
 * Choose normal or silent screenshot notifications independently for each event type
-* A short delay gives achievement and criteria notifications time to appear on screen
+* A short delay gives achievement, criteria and renown notifications time to appear on screen
 * Duplicate triggers are reduced with a configurable screenshot cooldown
 * Achievement steps can be photographed as well
 * Boss kills photograph the first kill of each boss on each difficulty, with an option for every kill
@@ -34,7 +34,7 @@ MemoryKeeper automatically takes screenshots when something worth remembering ha
 * Delve companion levels photograph each level of Brann or Valeera
 * PvP and reputation capturing start switched off
 * Reputation covers classic standings and friendship ranks, and is only captured when a rank actually moves, in either direction, never on plain point gains
-* Renown photographs major-faction and covenant renown level changes
+* Renown photographs major-faction and covenant renown level changes after the banner is on screen
 * Mounts photograph when a new mount is learned
 * Battle pets photograph the first of each species, not every extra of the same pet
 * Transmog sets photograph only when an official Collections journal set becomes complete, not each piece

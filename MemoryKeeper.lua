@@ -29,57 +29,69 @@ local function CanScreenshot(category)
     return (GetTime() - lastTime) >= (MemoryKeeperDB.cooldown or globalDefaults.cooldown)
 end
 
--- Blizzard's ActionStatus frame prints "Screenshot taken" when the client reports
--- SCREENSHOT_SUCCEEDED. The client only reports that once the image has actually
--- been written, which is several frames after Screenshot() returns, so the frame
--- has to stay unsubscribed until the result arrives rather than just across the
--- call. While it is unsubscribed we listen for the result ourselves.
+-- ActionStatus prints "Screenshot taken" from SCREENSHOT_SUCCEEDED in OnEvent.
+-- Screenshot() returns before that event; 1.1.0 proved it by re-subscribing on
+-- the next line and still seeing the label. Silent shots skip the display inside
+-- OnEvent. Do not UnregisterEvent on ActionStatus: that steals SUCCEEDED from
+-- every screenshot until we give it back, including non-silent ones, and
+-- RegisterEvent/UnregisterEvent now also mark the frame with Midnight's
+-- EventRegistrations forbidden aspect.
 local SILENT_RELEASE_TIMEOUT = 10
 
-local screenshotWatcher = CreateFrame("Frame")
-local outstandingSilentShots = 0
+local silentSkipRemaining = 0
+local actionStatusWrapped = false
 local silentReleaseTimer = nil
 
-local function RestoreScreenshotNotification()
-    -- The last successful silent shot has already counted the outstanding
-    -- total down to zero; that is still the moment to give ActionStatus back.
-    outstandingSilentShots = 0
+local function ReleaseSilentSkip()
+    silentSkipRemaining = 0
     if silentReleaseTimer then
         silentReleaseTimer:Cancel()
         silentReleaseTimer = nil
     end
-
-    screenshotWatcher:UnregisterEvent("SCREENSHOT_SUCCEEDED")
-    screenshotWatcher:UnregisterEvent("SCREENSHOT_FAILED")
-
-    if ActionStatus and ActionStatus.RegisterEvent then
-        ActionStatus:RegisterEvent("SCREENSHOT_SUCCEEDED")
-    end
 end
 
-screenshotWatcher:SetScript("OnEvent", function()
-    outstandingSilentShots = outstandingSilentShots - 1
-    if outstandingSilentShots <= 0 then
-        RestoreScreenshotNotification()
+local function WrapActionStatus()
+    if actionStatusWrapped then
+        return true
     end
-end)
+    if not ActionStatus then
+        return false
+    end
+
+    local original = ActionStatus:GetScript("OnEvent")
+    if not original and ActionStatusMixin then
+        original = ActionStatusMixin.OnEvent
+    end
+    if not original then
+        return false
+    end
+
+    ActionStatus:SetScript("OnEvent", function(self, event, ...)
+        if silentSkipRemaining > 0 and (event == "SCREENSHOT_SUCCEEDED" or event == "SCREENSHOT_FAILED") then
+            silentSkipRemaining = silentSkipRemaining - 1
+            if silentSkipRemaining <= 0 then
+                ReleaseSilentSkip()
+            end
+            return
+        end
+        original(self, event, ...)
+    end)
+
+    actionStatusWrapped = true
+    return true
+end
 
 local function SuppressScreenshotNotification()
-    if not (ActionStatus and ActionStatus.UnregisterEvent) then return false end
-
-    if outstandingSilentShots == 0 then
-        ActionStatus:UnregisterEvent("SCREENSHOT_SUCCEEDED")
-        screenshotWatcher:RegisterEvent("SCREENSHOT_SUCCEEDED")
-        screenshotWatcher:RegisterEvent("SCREENSHOT_FAILED")
+    if not WrapActionStatus() then
+        return false
     end
-    outstandingSilentShots = outstandingSilentShots + 1
 
-    -- Safety net in case the client never reports a result for this screenshot.
+    silentSkipRemaining = silentSkipRemaining + 1
     if silentReleaseTimer then
         silentReleaseTimer:Cancel()
     end
-    silentReleaseTimer = C_Timer.NewTimer(SILENT_RELEASE_TIMEOUT, RestoreScreenshotNotification)
-
+    -- Safety net in case the client never reports a result for this screenshot.
+    silentReleaseTimer = C_Timer.NewTimer(SILENT_RELEASE_TIMEOUT, ReleaseSilentSkip)
     return true
 end
 
@@ -117,6 +129,27 @@ local function QueueScreenshot(reason, delay, silent, category)
         DoScreenshot(reason, silent, category)
     end)
     pendingTimers[category] = timer
+end
+
+-- Types may cap or raise the configured delay for a specific event. Computed
+-- here so dispatch does not grow a second copy each time a type needs one.
+local function ScreenshotDelay(def, event)
+    local delay = MemoryKeeperDB.screenshotDelay or globalDefaults.screenshotDelay
+    local maxDelay = def.maxDelay
+    if def.eventMaxDelay then
+        maxDelay = def.eventMaxDelay[event] or maxDelay
+    end
+    if maxDelay then
+        delay = math.min(delay, maxDelay)
+    end
+    local minDelay = def.minDelay
+    if def.eventMinDelay then
+        minDelay = def.eventMinDelay[event] or minDelay
+    end
+    if minDelay then
+        delay = math.max(delay, minDelay)
+    end
+    return delay
 end
 
 -- First-seen memories. The game will not tell us whether this character has
@@ -649,7 +682,8 @@ end
 -- returns the debug text for the screenshot, or nil to skip capturing entirely.
 -- extraCheckboxes are shown indented under the type. remember() records state
 -- even while the type is switched off. eventMaxDelay caps the screenshot delay
--- for specific events of a type that owns more than one.
+-- for specific events of a type that owns more than one. eventMinDelay raises
+-- it when the game itself waits before showing the toast.
 --
 -- Types list the events they care about. The game uses one standing event for
 -- classic ranks, friendship, and companion XP, so more than one type may list
@@ -841,6 +875,8 @@ local captureTypes = {
         defaultEnabled = true,
         defaultSilent = false,
         events = { "MAJOR_FACTION_RENOWN_LEVEL_CHANGED", "COVENANT_SANCTUM_RENOWN_LEVEL_CHANGED" },
+        -- Blizzard waits 1s, then fades the banner in (label startDelay 0.5 + 0.16).
+        eventMinDelay = { MAJOR_FACTION_RENOWN_LEVEL_CHANGED = 1.8 },
         describe = function(event, ...)
             if event == "MAJOR_FACTION_RENOWN_LEVEL_CHANGED" then
                 local majorFactionID, newRenownLevel = ...
@@ -998,16 +1034,7 @@ addon:SetScript("OnEvent", function(self, event, ...)
                 def.remember(event, ...)
             end
             if enabled and reason then
-                local delay = MemoryKeeperDB.screenshotDelay or globalDefaults.screenshotDelay
-                local maxDelay = def.maxDelay
-                if def.eventMaxDelay then
-                    maxDelay = def.eventMaxDelay[event] or maxDelay
-                end
-                if maxDelay then
-                    delay = math.min(delay, maxDelay)
-                end
-
-                QueueScreenshot(reason, delay, MemoryKeeperDB[def.silentDbKey], def.key)
+                QueueScreenshot(reason, ScreenshotDelay(def, event), MemoryKeeperDB[def.silentDbKey], def.key)
             end
         end
     end

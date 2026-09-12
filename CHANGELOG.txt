@@ -24,7 +24,8 @@ V1.1.4
 - Renown is its own option
 
 V1.1.5
-- Silent screenshot notification is restored after a cinematic, instead of staying hidden until logout
+- FIX: Silent screenshots hide "Screenshot taken" without leaving the label off afterwards
+- FIX: Renown screenshots wait for the major-faction banner to appear
 - Mount screenshots when a new mount is learned
 - Battle pet screenshots when a new species is collected
 - Transmog set screenshots when an official Collections journal set becomes complete
