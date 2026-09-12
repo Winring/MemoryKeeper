@@ -18,6 +18,12 @@ local function Debug(msg)
     end
 end
 
+-- Every session baseline at PLAYER_LOGIN (and when that type is switched on)
+-- reports through here, so a slow walk shows up the same way under /mk debug.
+local function DebugBaseline(count, what)
+    Debug(string.format("Recorded %d %s in %.1f ms", count, what, debugprofilestop()))
+end
+
 local function CanScreenshot(category)
     local lastTime = lastScreenshotTime[category] or 0
     return (GetTime() - lastTime) >= (MemoryKeeperDB.cooldown or globalDefaults.cooldown)
@@ -35,8 +41,8 @@ local outstandingSilentShots = 0
 local silentReleaseTimer = nil
 
 local function RestoreScreenshotNotification()
-    if outstandingSilentShots == 0 then return end
-
+    -- The last successful silent shot has already counted the outstanding
+    -- total down to zero; that is still the moment to give ActionStatus back.
     outstandingSilentShots = 0
     if silentReleaseTimer then
         silentReleaseTimer:Cancel()
@@ -212,9 +218,9 @@ end
 
 -- Delves have no completion event of their own. The run is a scenario, and
 -- HasActiveDelve() can already be false when it finishes, so identity is
--- snapshotted on the way in. Stories of the same delve are different scenarios
+-- stored on the way in. Stories of the same delve are different scenarios
 -- (and historically different difficulty). instanceType "none" is the overworld;
--- a leftover snapshot must not count Theatre Troupe.
+-- a leftover run must not count Theatre Troupe.
 local activeDelveRun = nil
 
 local function IsInDelveContent()
@@ -339,12 +345,16 @@ local function GetCompanionLevel(factionID)
     return ranks.currentLevel, ranks.maxLevel
 end
 
-local function SnapshotCompanionLevels()
+local function BaselineCompanionLevels()
+    debugprofilestart()
     RefreshCompanionFactionIDs()
     wipe(companionLevels)
+    local recorded = 0
     for factionID in pairs(companionFactionIDs) do
         companionLevels[factionID] = GetCompanionLevel(factionID)
+        recorded = recorded + 1
     end
+    DebugBaseline(recorded, "companion levels")
 end
 
 -- FACTION_STANDING_CHANGED carries the new reputation total and fires on every
@@ -389,7 +399,7 @@ end
 -- Taken at login, and again whenever the category is switched back on, because
 -- nothing is tracked while it is off and stale ranks would report a change that
 -- already happened as if it were new.
-local function SnapshotFactionRanks()
+local function BaselineFactionRanks()
     RefreshCompanionFactionIDs()
     wipe(factionRanks)
     debugprofilestart()
@@ -405,7 +415,49 @@ local function SnapshotFactionRanks()
         end
     end
 
-    Debug(string.format("Recorded the rank of %d factions in %.1f ms", recorded, debugprofilestop()))
+    DebugBaseline(recorded, "factions")
+end
+
+-- Official journal sets stay collected after they are finished, and a later
+-- source of the same slot still fires TRANSMOG_COLLECTION_SOURCE_ADDED. The
+-- previous collected set IDs are what distinguish a set that just completed
+-- from one that was already done. Session state only; the event itself is the
+-- first time that source is learned.
+local collectedTransmogSets = {}
+
+local function BaselineCollectedTransmogSets()
+    wipe(collectedTransmogSets)
+    debugprofilestart()
+    local recorded = 0
+    local sets = C_TransmogSets.GetAllSets()
+    if sets then
+        for i = 1, #sets do
+            local info = sets[i]
+            if info.collected then
+                collectedTransmogSets[info.setID] = true
+                recorded = recorded + 1
+            end
+        end
+    end
+    DebugBaseline(recorded, "completed transmog sets")
+end
+
+local function FormatTransmogSetName(info)
+    if info.description and info.description ~= "" then
+        return tostring(info.name) .. " (" .. tostring(info.description) .. ")"
+    end
+    return tostring(info.name)
+end
+
+-- Marks the set collected for this session. Names are only added when the set
+-- is for this character; other class masks can complete in the background.
+local function NoteNewlyCompletedTransmogSet(setID, names)
+    if not setID or collectedTransmogSets[setID] then return end
+    local info = C_TransmogSets.GetSetInfo(setID)
+    if not info or not info.collected then return end
+    collectedTransmogSets[setID] = true
+    if not info.validForCharacter then return end
+    names[#names + 1] = FormatTransmogSetName(info)
 end
 
 -- CRITERIA_EARNED payload is (achievementID, description, achievementAlreadyEarnedOnAccount).
@@ -491,6 +543,50 @@ local function DescribeStandingChange(factionID, updatedStanding)
     if previous == nil or previous == rank then return nil end
 
     return "Reputation: " .. tostring(standing) .. " with " .. tostring(data.name)
+end
+
+local function DescribeMount(mountID)
+    local name = C_MountJournal.GetMountInfoByID(mountID)
+    if name and name ~= "" then
+        return "Mount: " .. name
+    end
+    return "Mount " .. tostring(mountID)
+end
+
+-- NEW_PET_ADDED fires for every new journal slot, including a second of the
+-- same species. The species becoming known is the memory; GetNumCollectedInfo
+-- is already 1 when this first pet is added.
+local function DescribePet(battlePetGUID)
+    local speciesID, customName, _, _, _, _, _, name = C_PetJournal.GetPetInfoByPetID(battlePetGUID)
+    if not speciesID then return nil end
+    local numOwned = C_PetJournal.GetNumCollectedInfo(speciesID)
+    if numOwned and numOwned > 1 then return nil end
+    local title = name or customName or tostring(speciesID)
+    return "Battle pet: " .. tostring(title)
+end
+
+-- Completing Mythic can also mark earlier variants collected. Walk the base
+-- set and its variants, not only the sets that contain this source.
+local function DescribeTransmogSetComplete(sourceID)
+    local names = {}
+    local setIDs = C_TransmogSets.GetSetsContainingSourceID(sourceID)
+    local seenBase = {}
+    for _, setID in ipairs(setIDs or {}) do
+        local baseID = C_TransmogSets.GetBaseSetID(setID) or setID
+        if not seenBase[baseID] then
+            seenBase[baseID] = true
+            NoteNewlyCompletedTransmogSet(baseID, names)
+            local variants = C_TransmogSets.GetVariantSets(baseID)
+            if variants then
+                for i = 1, #variants do
+                    NoteNewlyCompletedTransmogSet(variants[i].setID, names)
+                end
+            end
+        end
+        NoteNewlyCompletedTransmogSet(setID, names)
+    end
+    if #names == 0 then return nil end
+    return "Transmog set: " .. table.concat(names, ", ")
 end
 
 local cinematicActive = false
@@ -693,7 +789,7 @@ local captureTypes = {
         defaultEnabled = true,
         defaultSilent = false,
         events = { "FACTION_STANDING_CHANGED" },
-        reset = SnapshotCompanionLevels,
+        reset = BaselineCompanionLevels,
         describe = DescribeCompanionLevel,
     },
     {
@@ -731,7 +827,7 @@ local captureTypes = {
         defaultEnabled = false,
         defaultSilent = false,
         events = { "FACTION_STANDING_CHANGED" },
-        reset = SnapshotFactionRanks,
+        reset = BaselineFactionRanks,
         describe = function(event, factionID, updatedStanding)
             return DescribeStandingChange(factionID, updatedStanding)
         end,
@@ -753,6 +849,46 @@ local captureTypes = {
             end
             local newRenownLevel = ...
             return "Covenant renown " .. tostring(newRenownLevel)
+        end,
+    },
+    {
+        key = "mount",
+        label = "Mounts",
+        tooltip = "Capture a screenshot when this account learns a new mount.",
+        dbKey = "mount",
+        silentDbKey = "silentMount",
+        defaultEnabled = true,
+        defaultSilent = false,
+        events = { "NEW_MOUNT_ADDED" },
+        describe = function(event, mountID)
+            return DescribeMount(mountID)
+        end,
+    },
+    {
+        key = "pet",
+        label = "Battle pets",
+        tooltip = "Capture a screenshot when this account collects a new battle-pet species.",
+        dbKey = "pet",
+        silentDbKey = "silentPet",
+        defaultEnabled = true,
+        defaultSilent = false,
+        events = { "NEW_PET_ADDED" },
+        describe = function(event, battlePetGUID)
+            return DescribePet(battlePetGUID)
+        end,
+    },
+    {
+        key = "transmogSet",
+        label = "Transmog sets",
+        tooltip = "Capture a screenshot when an official Collections journal set becomes complete.",
+        dbKey = "transmogSet",
+        silentDbKey = "silentTransmogSet",
+        defaultEnabled = true,
+        defaultSilent = false,
+        events = { "TRANSMOG_COLLECTION_SOURCE_ADDED", "TRANSMOG_COSMETIC_COLLECTION_SOURCE_ADDED" },
+        reset = BaselineCollectedTransmogSets,
+        describe = function(event, sourceID)
+            return DescribeTransmogSetComplete(sourceID)
         end,
     },
     {
