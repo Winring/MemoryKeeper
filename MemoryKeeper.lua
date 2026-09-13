@@ -835,6 +835,8 @@ local captureTypes = {
         defaultEnabled = true,
         defaultSilent = false,
         events = { "PLAYER_LEVEL_UP" },
+        -- Event toast text fades in after 1.8s (duration 0.5). The gold bars grow from 1.5s.
+        eventMinDelay = { PLAYER_LEVEL_UP = 2.4 },
         describe = function(event, level)
             return "Level " .. tostring(level)
         end,

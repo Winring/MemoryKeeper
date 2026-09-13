@@ -26,6 +26,7 @@ V1.1.4
 V1.1.5
 - FIX: Silent screenshots hide "Screenshot taken" without leaving the label off afterwards
 - FIX: Renown screenshots wait for the major-faction banner to appear
+- FIX: Level-up screenshots wait for the banner text to appear
 - Mount screenshots when a new mount is learned
 - Battle pet screenshots when a new species is collected
 - Transmog set screenshots when an official Collections journal set becomes complete
